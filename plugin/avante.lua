@@ -118,8 +118,11 @@ cmd("SwitchProvider", function(opts) require("avante.api").switch_provider(vim.t
 cmd("Clear", function() require("avante.path").clear() end, { desc = "avante: clear all chat history" })
 cmd("ShowRepoMap", function() require("avante.repo_map").show() end, { desc = "avante: show repo map" })
 
-cmd(
-  "Transfer",
-  function() require("avante.webui").transfer_chat_history() end,
-  { desc = "avante: transfer the history to webui" }
-)
+cmd("Transfer", function()
+  local ok, webui = pcall(require, "avante.webui")
+  if not ok then
+    vim.notify("Failed to load webui module: " .. webui, vim.log.levels.ERROR)
+    return
+  end
+  webui.transfer_chat_history()
+end, { desc = "avante: transfer the history to webui" })

@@ -1,10 +1,24 @@
+-- First check for external dependencies
+local curl = require("plenary.curl")
 local Utils = require("avante.utils")
 local Path = require("avante.path")
-local Buffer = require("avante.buffer")
-local curl = require("plenary.curl")
-local uuid = require("plenary.uuid")
+local api = vim.api
 
----@class AvanteWebUI
+-- Initialize random seed for UUID generation
+math.randomseed(os.time())
+
+-- UUID generation implementation
+local uuid = {
+  new = function()
+    local template = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
+    return string.gsub(template, "[xy]", function(c)
+      local v = (c == "x") and math.random(0, 0xf) or math.random(8, 0xb)
+      return string.format("%x", v)
+    end)
+  end,
+}
+
+---@class avante.WebUI
 local M = {}
 
 -- Environment variable for the WebUI URL
@@ -35,7 +49,7 @@ function M.format_request(opts)
       role = "user",
       content = entry.request,
       timestamp = tonumber(entry.timestamp),
-      models = { entry.model or "anthropic.claude-3-5-haiku-latest" },
+      models = { "anthropic.claude-3-5-sonnet-latest" },
     }
 
     -- Add user message to both structures
@@ -51,7 +65,7 @@ function M.format_request(opts)
         role = "assistant",
         content = entry.response,
         timestamp = tonumber(entry.timestamp),
-        models = { entry.model or "anthropic.claude-3-5-haiku-latest" },
+        models = { "anthropic.claude-3-5-sonnet-latest" },
       }
 
       -- Add assistant message to both structures
@@ -76,7 +90,7 @@ function M.format_request(opts)
   return {
     chat = {
       id = chat_id,
-      title = Buffer.get_relative_path() or "New Chat",
+      title = "From nvim",
       models = { "anthropic.claude-3-5-haiku-latest" },
       params = {},
       history = {
@@ -92,7 +106,7 @@ end
 
 function M.transfer_chat_history()
   -- Get the current buffer number
-  local bufnr = vim.api.nvim_get_current_buf()
+  local bufnr = api.nvim_get_current_buf()
 
   -- Load chat history for current buffer
   local chat_history = Path.history.load(bufnr)
