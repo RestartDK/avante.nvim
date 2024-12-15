@@ -90,7 +90,7 @@ function M.format_request(opts)
   return {
     chat = {
       id = chat_id,
-      title = "From nvim",
+      title = "Yoinked from nvim",
       models = { "anthropic.claude-3-5-haiku-latest" },
       params = {},
       history = {
