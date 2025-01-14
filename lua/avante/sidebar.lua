@@ -133,6 +133,13 @@ function Sidebar:focus()
   return false
 end
 
+function Sidebar:focus_input()
+  if self.input_container and self.input_container.winid and api.nvim_win_is_valid(self.input_container.winid) then
+    api.nvim_set_current_win(self.input_container.winid)
+    api.nvim_feedkeys("i", "n", false)
+  end
+end
+
 function Sidebar:is_open()
   return self.result_container
     and self.result_container.bufnr
@@ -193,6 +200,15 @@ local function transform_result_content(selected_files, result_content, prev_fil
     end
     if line_content == "<SEARCH>" then
       is_searching = true
+      local prev_line = result_lines[i - 1]
+      if
+        prev_line
+        and prev_filepath
+        and not prev_line:match("Filepath:.+")
+        and not prev_line:match("<FILEPATH>.+</FILEPATH>")
+      then
+        table.insert(transformed_lines, string.format("Filepath: %s", prev_filepath))
+      end
       local next_line = result_lines[i + 1]
       if next_line and next_line:match("^%s*```%w+$") then i = i + 1 end
       search_start = i + 1
@@ -208,8 +224,9 @@ local function transform_result_content(selected_files, result_content, prev_fil
       local start_line = 0
       local end_line = 0
       local match_filetype = nil
+      local filepath = current_filepath or prev_filepath or ""
       for _, file in ipairs(selected_files) do
-        if not Utils.is_same_file(file.path, prev_filepath or "") then goto continue1 end
+        if not Utils.is_same_file(file.path, filepath) then goto continue1 end
         local file_content = vim.split(file.content, "\n")
         if start_line ~= 0 or end_line ~= 0 then break end
         for j = 1, #file_content - (search_end - search_start) + 1 do
@@ -660,9 +677,7 @@ function Sidebar:apply(current_cursor)
     selected_snippets_map = all_snippets_map
   end
 
-  if Config.options.behaviour.minimize_diff then
-    selected_snippets_map = self:minimize_snippets(selected_snippets_map)
-  end
+  if Config.behaviour.minimize_diff then selected_snippets_map = self:minimize_snippets(selected_snippets_map) end
 
   vim.defer_fn(function()
     api.nvim_set_current_win(self.code.winid)
@@ -1026,10 +1041,16 @@ function Sidebar:on_mount(opts)
     group = self.augroup,
     buffer = self.result_container.bufnr,
     callback = function()
-      self:focus()
-      if self.input_container and self.input_container.winid and api.nvim_win_is_valid(self.input_container.winid) then
-        api.nvim_set_current_win(self.input_container.winid)
-        if Config.windows.ask.start_insert then vim.cmd("startinsert") end
+      if Config.behaviour.auto_focus_sidebar then
+        self:focus()
+        if
+          self.input_container
+          and self.input_container.winid
+          and api.nvim_win_is_valid(self.input_container.winid)
+        then
+          api.nvim_set_current_win(self.input_container.winid)
+          if Config.windows.ask.start_insert then vim.cmd("startinsert") end
+        end
       end
       return true
     end,
@@ -1095,13 +1116,13 @@ function Sidebar:refresh_winids()
       { "n", "i" },
       Config.mappings.sidebar.switch_windows,
       function() switch_windows() end,
-      { buffer = buf, noremap = true, silent = true }
+      { buffer = buf, noremap = true, silent = true, nowait = true }
     )
     Utils.safe_keymap_set(
       { "n", "i" },
       Config.mappings.sidebar.reverse_switch_windows,
       function() reverse_switch_windows() end,
-      { buffer = buf, noremap = true, silent = true }
+      { buffer = buf, noremap = true, silent = true, nowait = true }
     )
   end
 end
@@ -1127,8 +1148,13 @@ function Sidebar:initialize()
 
   if not self.code.bufnr or not api.nvim_buf_is_valid(self.code.bufnr) then return self end
 
+  local buf_path = api.nvim_buf_get_name(self.code.bufnr)
+  -- if the filepath is outside of the current working directory then we want the absolute path
+  local file_path = Utils.file.is_in_cwd(buf_path) and Utils.relative_path(buf_path) or buf_path
+  Utils.debug("Sidebar:initialize adding buffer to file selector", buf_path)
+
   self.file_selector:reset()
-  self.file_selector:add_selected_file(Utils.relative_path(api.nvim_buf_get_name(self.code.bufnr)))
+  self.file_selector:add_selected_file(file_path)
 
   return self
 end
@@ -1231,11 +1257,9 @@ function Sidebar:update_content(content, opts)
       Utils.update_buffer_content(self.result_container.bufnr, lines)
       Utils.lock_buf(self.result_container.bufnr)
       api.nvim_set_option_value("filetype", "Avante", { buf = self.result_container.bufnr })
-      if opts.focus and not self:is_focused_on_result() then
-        xpcall(function()
-          --- set cursor to bottom of result view
-          api.nvim_set_current_win(self.result_container.winid)
-        end, function(err) return err end)
+      if opts.focus and Config.behaviour.auto_focus_sidebar and not self:is_focused_on_result() then
+        --- set cursor to bottom of result view
+        xpcall(function() api.nvim_set_current_win(self.result_container.winid) end, function(err) return err end)
       end
 
       if opts.scroll then Utils.buf_scroll_to_end(self.result_container.bufnr) end
@@ -1312,13 +1336,15 @@ function Sidebar:render_history_content(history)
       goto continue
     end
     local selected_filepaths = entry.selected_filepaths
-    if not selected_filepaths then selected_filepaths = { entry.selected_file.filepath } end
+    if not selected_filepaths and entry.selected_file ~= nil then
+      selected_filepaths = { entry.selected_file.filepath }
+    end
     local prefix = render_chat_record_prefix(
       entry.timestamp,
       entry.provider,
       entry.model,
       entry.request or "",
-      selected_filepaths,
+      selected_filepaths or {},
       entry.selected_code
     )
     content = content .. prefix
@@ -1374,10 +1400,16 @@ function Sidebar:clear_history(args, cb)
   if next(chat_history) ~= nil then
     chat_history = {}
     Path.history.save(self.code.bufnr, chat_history)
-    self:update_content("Chat history cleared", { focus = false, scroll = false })
+    self:update_content(
+      "Chat history cleared",
+      { focus = false, scroll = false, callback = function() self:focus_input() end }
+    )
     if cb then cb(args) end
   else
-    self:update_content("Chat history is already empty", { focus = false, scroll = false })
+    self:update_content(
+      "Chat history is already empty",
+      { focus = false, scroll = false, callback = function() self:focus_input() end }
+    )
   end
 end
 
@@ -1397,10 +1429,17 @@ function Sidebar:reset_memory(args, cb)
     })
     Path.history.save(self.code.bufnr, chat_history)
     local history_content = self:render_history_content(chat_history)
-    self:update_content(history_content, { focus = false, scroll = true })
+    self:update_content(history_content, {
+      focus = false,
+      scroll = true,
+      callback = function() self:focus_input() end,
+    })
     if cb then cb(args) end
   else
-    self:update_content("Chat history is already empty", { focus = false, scroll = false })
+    self:update_content(
+      "Chat history is already empty",
+      { focus = false, scroll = false, callback = function() self:focus_input() end }
+    )
   end
 end
 
@@ -1680,6 +1719,7 @@ function Sidebar:create_input_container(opts)
           self.result_container
           and self.result_container.winid
           and api.nvim_win_is_valid(self.result_container.winid)
+          and Config.behaviour.auto_focus_sidebar
         then
           api.nvim_set_current_win(self.result_container.winid)
         end

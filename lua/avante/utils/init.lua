@@ -153,12 +153,12 @@ end
 ---@param str string
 ---@param opts? {suffix?: string, prefix?: string}
 function M.trim(str, opts)
-  if not opts then return str end
   local res = str
+  if not opts then return res end
   if opts.suffix then
-    res = str:sub(#str - #opts.suffix + 1) == opts.suffix and str:sub(1, #str - #opts.suffix) or str
+    res = res:sub(#res - #opts.suffix + 1) == opts.suffix and res:sub(1, #res - #opts.suffix) or res
   end
-  if opts.prefix then res = str:sub(1, #opts.prefix) == opts.prefix and str:sub(#opts.prefix + 1) or str end
+  if opts.prefix then res = res:sub(1, #opts.prefix) == opts.prefix and res:sub(#opts.prefix + 1) or res end
   return res
 end
 
@@ -331,7 +331,7 @@ function M.warn(msg, opts)
 end
 
 function M.debug(...)
-  if not require("avante.config").options.debug then return end
+  if not require("avante.config").debug then return end
 
   local args = { ... }
   if #args == 0 then return end
@@ -462,6 +462,8 @@ function M.url_join(...)
 
     ::continue::
   end
+
+  if result:sub(-1) == "/" then result = result:sub(1, -2) end
 
   return result
 end
@@ -631,7 +633,7 @@ function M.parse_gitignore(gitignore_path)
   return ignore_patterns, negate_patterns
 end
 
-local function is_ignored(file, ignore_patterns, negate_patterns)
+function M.is_ignored(file, ignore_patterns, negate_patterns)
   for _, pattern in ipairs(negate_patterns) do
     if file:match(pattern) then return false end
   end
@@ -655,7 +657,7 @@ function M.scan_directory(directory, ignore_patterns, negate_patterns)
     if type == "directory" then
       vim.list_extend(files, M.scan_directory(full_path, ignore_patterns, negate_patterns))
     elseif type == "file" then
-      if not is_ignored(full_path, ignore_patterns, negate_patterns) then table.insert(files, full_path) end
+      if not M.is_ignored(full_path, ignore_patterns, negate_patterns) then table.insert(files, full_path) end
     end
   end
 
@@ -824,6 +826,7 @@ function M.get_current_selection_diagnostics(bufnr, selection)
 end
 
 function M.uniform_path(path)
+  if not M.file.is_in_cwd(path) then return path end
   local project_root = M.get_project_root()
   local abs_path = Path:new(project_root):joinpath(path):absolute()
   local relative_path = Path:new(abs_path):make_relative(project_root)
