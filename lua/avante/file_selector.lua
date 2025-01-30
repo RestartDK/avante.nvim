@@ -11,10 +11,63 @@ local FileSelector = {}
 --- @class FileSelector
 --- @field id integer
 --- @field selected_filepaths string[]
---- @field file_cache string[]
 --- @field event_handlers table<string, function[]>
 
----@alias FileSelectorHandler fun(self: FileSelector, on_select: fun(on_select: fun(filepath: string)|nil)): nil
+---@alias FileSelectorHandler fun(self: FileSelector, on_select: fun(filepaths: string[] | nil)): nil
+
+function FileSelector:process_directory(absolute_path, project_root)
+  local files = scan.scan_dir(absolute_path, {
+    hidden = false,
+    depth = math.huge,
+    add_dirs = false,
+    respect_gitignore = true,
+  })
+
+  for _, file in ipairs(files) do
+    local rel_path = Path:new(file):make_relative(project_root)
+    if not vim.tbl_contains(self.selected_filepaths, rel_path) then table.insert(self.selected_filepaths, rel_path) end
+  end
+  self:emit("update")
+end
+
+---@param selected_paths string[] | nil
+---@return nil
+function FileSelector:handle_path_selection(selected_paths)
+  if not selected_paths then return end
+  local project_root = Utils.get_project_root()
+
+  for _, selected_path in ipairs(selected_paths) do
+    local absolute_path = Path:new(project_root):joinpath(selected_path):absolute()
+
+    local stat = vim.loop.fs_stat(absolute_path)
+    if stat and stat.type == "directory" then
+      self.process_directory(self, absolute_path, project_root)
+    else
+      local uniform_path = Utils.uniform_path(selected_path)
+      if Config.file_selector.provider == "native" then
+        table.insert(self.selected_filepaths, uniform_path)
+      else
+        if not vim.tbl_contains(self.selected_filepaths, uniform_path) then
+          table.insert(self.selected_filepaths, uniform_path)
+        end
+      end
+    end
+  end
+  self:emit("update")
+end
+
+local function get_project_filepaths()
+  local project_root = Utils.get_project_root()
+  local files = Utils.scan_directory_respect_gitignore({ directory = project_root, add_dirs = true })
+  files = vim.iter(files):map(function(filepath) return Path:new(filepath):make_relative(project_root) end):totable()
+
+  return vim.tbl_map(function(path)
+    local rel_path = Path:new(path):make_relative(project_root)
+    local stat = vim.loop.fs_stat(path)
+    if stat and stat.type == "directory" then rel_path = rel_path .. "/" end
+    return rel_path
+  end, files)
+end
 
 ---@param id integer
 ---@return FileSelector
@@ -22,7 +75,6 @@ function FileSelector:new(id)
   return setmetatable({
     id = id,
     selected_files = {},
-    file_cache = {},
     event_handlers = {},
   }, { __index = self })
 end
@@ -35,6 +87,13 @@ end
 function FileSelector:add_selected_file(filepath)
   if not filepath or filepath == "" then return end
 
+  local absolute_path = Path:new(Utils.get_project_root()):joinpath(filepath):absolute()
+  local stat = vim.loop.fs_stat(absolute_path)
+
+  if stat and stat.type == "directory" then
+    self.process_directory(self, absolute_path, Utils.get_project_root())
+    return
+  end
   local uniform_path = Utils.uniform_path(filepath)
 
   -- Avoid duplicates
@@ -104,26 +163,29 @@ function FileSelector:off(event, callback)
   end
 end
 
----@return nil
-function FileSelector:open()
-  if Config.file_selector.provider == "native" then self:update_file_cache() end
-  self:show_select_ui()
-end
+function FileSelector:open() self:show_select_ui() end
 
----@return nil
-function FileSelector:update_file_cache()
-  local project_root = Path:new(Utils.get_project_root()):absolute()
+function FileSelector:get_filepaths()
+  local filepaths = get_project_filepaths()
 
-  local filepaths = scan.scan_dir(project_root, {
-    respect_gitignore = true,
-  })
+  table.sort(filepaths, function(a, b)
+    local a_stat = vim.loop.fs_stat(a)
+    local b_stat = vim.loop.fs_stat(b)
+    local a_is_dir = a_stat and a_stat.type == "directory"
+    local b_is_dir = b_stat and b_stat.type == "directory"
 
-  -- Sort buffer names alphabetically
-  table.sort(filepaths, function(a, b) return a < b end)
+    if a_is_dir and not b_is_dir then
+      return true
+    elseif not a_is_dir and b_is_dir then
+      return false
+    else
+      return a < b
+    end
+  end)
 
-  self.file_cache = vim
+  return vim
     .iter(filepaths)
-    :map(function(filepath) return Path:new(filepath):make_relative(project_root) end)
+    :filter(function(filepath) return not vim.tbl_contains(self.selected_filepaths, filepath) end)
     :totable()
 end
 
@@ -135,27 +197,53 @@ function FileSelector:fzf_ui(handler)
     return
   end
 
-  local close_action = function() handler(nil) end
-  fzf_lua.files(vim.tbl_deep_extend("force", Config.file_selector.provider_opts, {
-    file_ignore_patterns = self.selected_filepaths,
-    prompt = string.format("%s> ", PROMPT_TITLE),
-    fzf_opts = {},
-    git_icons = false,
-    actions = {
-      ["default"] = function(selected)
-        if not selected or #selected == 0 then return close_action() end
-        local selections = {}
-        for _, entry in ipairs(selected) do
-          local file = fzf_lua.path.entry_to_file(entry)
-          if file and file.path then table.insert(selections, file.path) end
-        end
+  local filepaths = self:get_filepaths()
 
-        if #selections > 0 then handler(#selections == 1 and selections[1] or selections) end
-      end,
-      ["esc"] = close_action,
-      ["ctrl-c"] = close_action,
-    },
-  }))
+  local close_action = function() handler(nil) end
+  fzf_lua.fzf_exec(
+    filepaths,
+    vim.tbl_deep_extend("force", {
+      prompt = string.format("%s> ", PROMPT_TITLE),
+      fzf_opts = {},
+      git_icons = false,
+      actions = {
+        ["default"] = function(selected)
+          if not selected or #selected == 0 then return close_action() end
+          ---@type string[]
+          local selections = {}
+          for _, entry in ipairs(selected) do
+            local file = fzf_lua.path.entry_to_file(entry)
+            if file and file.path then table.insert(selections, file.path) end
+          end
+
+          handler(selections)
+        end,
+        ["esc"] = close_action,
+        ["ctrl-c"] = close_action,
+      },
+    }, Config.file_selector.provider_opts)
+  )
+end
+
+function FileSelector:mini_pick_ui(handler)
+  local success, mini_pick = pcall(require, "mini.pick")
+  if not success then
+    Utils.error("mini.pick is not installed. Please install mini.pick to use it as a file selector.")
+    return
+  end
+  handler(mini_pick.builtin.files())
+end
+
+function FileSelector:snacks_picker_ui(handler)
+  Snacks.picker.files({
+    exclude = self.selected_filepaths,
+    confirm = function(picker)
+      picker:close()
+      local items = picker:selected({ fallback = true })
+      local files = vim.tbl_map(function(item) return item.file end, items)
+      handler(files)
+    end,
+  })
 end
 
 function FileSelector:telescope_ui(handler)
@@ -172,17 +260,18 @@ function FileSelector:telescope_ui(handler)
   local action_state = require("telescope.actions.state")
   local action_utils = require("telescope.actions.utils")
 
+  local files = self:get_filepaths()
+
   pickers
     .new(
       {},
-      vim.tbl_extend("force", Config.file_selector.provider_opts, {
+      vim.tbl_extend("force", {
         file_ignore_patterns = self.selected_filepaths,
         prompt_title = string.format("%s> ", PROMPT_TITLE),
-        finder = finders.new_oneshot_job({ "git", "ls-files" }, { cwd = Utils.get_project_root() }),
+        finder = finders.new_table(files),
         sorter = conf.file_sorter(),
         attach_mappings = function(prompt_bufnr, map)
           map("i", "<esc>", require("telescope.actions").close)
-
           actions.select_default:replace(function()
             local picker = action_state.get_current_picker(prompt_bufnr)
 
@@ -191,60 +280,50 @@ function FileSelector:telescope_ui(handler)
 
               action_utils.map_selections(prompt_bufnr, function(selection) table.insert(selections, selection[1]) end)
 
-              if #selections > 0 then handler(selections) end
+              handler(selections)
             else
-              local selection = action_state.get_selected_entry()
+              local selections = action_state.get_selected_entry()
 
-              handler(selection[1])
+              handler(selections)
             end
 
             actions.close(prompt_bufnr)
           end)
           return true
         end,
-      })
+      }, Config.file_selector.provider_opts)
     )
     :find()
 end
 
 function FileSelector:native_ui(handler)
-  local filepaths = vim
-    .iter(self.file_cache)
-    :filter(function(filepath) return not vim.tbl_contains(self.selected_filepaths, filepath) end)
-    :totable()
+  local filepaths = self:get_filepaths()
 
   vim.ui.select(filepaths, {
     prompt = string.format("%s:", PROMPT_TITLE),
     format_item = function(item) return item end,
-  }, handler)
+  }, function(item)
+    if item then
+      handler({ item })
+    else
+      handler(nil)
+    end
+  end)
 end
 
 ---@return nil
 function FileSelector:show_select_ui()
-  local handler = function(filepaths)
-    if not filepaths then return end
-    -- Convert single filepath to array for unified handling
-    local paths = type(filepaths) == "string" and { filepaths } or filepaths
-
-    for _, filepath in ipairs(paths) do
-      local uniform_path = Utils.uniform_path(filepath)
-      if Config.file_selector.provider == "native" then
-        table.insert(self.selected_filepaths, uniform_path)
-      else
-        if not vim.tbl_contains(self.selected_filepaths, uniform_path) then
-          table.insert(self.selected_filepaths, uniform_path)
-        end
-      end
-    end
-
-    self:emit("update")
-  end
+  local function handler(selected_paths) self:handle_path_selection(selected_paths) end
 
   vim.schedule(function()
     if Config.file_selector.provider == "native" then
       self:native_ui(handler)
     elseif Config.file_selector.provider == "fzf" then
       self:fzf_ui(handler)
+    elseif Config.file_selector.provider == "mini.pick" then
+      self:mini_pick_ui(handler)
+    elseif Config.file_selector.provider == "snacks" then
+      self:snacks_picker_ui(handler)
     elseif Config.file_selector.provider == "telescope" then
       self:telescope_ui(handler)
     else
@@ -274,32 +353,27 @@ end
 function FileSelector:get_selected_files_contents()
   local contents = {}
   for _, file_path in ipairs(self.selected_filepaths) do
-    --- lookup loaded buffer firstly
+    --- Lookup if the file is loaded in a buffer
     local bufnr = vim.fn.bufnr(file_path)
-    if bufnr ~= -1 then
+    if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) then
+      -- If buffer exists and is loaded, get buffer content
       local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
       local content = table.concat(lines, "\n")
       local filetype = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
       table.insert(contents, { path = file_path, content = content, file_type = filetype })
-      goto continue
+    else
+      -- Fallback: read file from disk
+      local file, open_err = io.open(file_path, "r")
+      if file then
+        local content = file:read("*all")
+        file:close()
+        -- Detect the file type using the specific file's content
+        local filetype = vim.filetype.match({ filename = file_path, contents = { content } }) or "unknown"
+        table.insert(contents, { path = file_path, content = content, file_type = filetype })
+      else
+        Utils.debug("error reading file:", open_err)
+      end
     end
-
-    local file, open_err = io.open(file_path, "r")
-
-    if open_err then Utils.debug("error reading file:", open_err) end
-
-    if file then
-      local content, read_err = file:read("*all")
-      file:close()
-
-      if read_err then Utils.debug("failed to read:", file_path, read_err) end
-
-      -- Detect the file type
-      local filetype = vim.filetype.match({ filename = file_path, contents = contents }) or "unknown"
-
-      table.insert(contents, { path = file_path, content = content, file_type = filetype })
-    end
-    ::continue::
   end
   return contents
 end

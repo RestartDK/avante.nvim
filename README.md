@@ -49,7 +49,7 @@ For building binary if you wish to build from source, then `cargo` is required. 
   "yetone/avante.nvim",
   event = "VeryLazy",
   lazy = false,
-  version = false, -- set this to "*" if you want to always pull the latest change, false to update on release
+  version = false, -- Set this to "*" to always pull the latest release version, or set it to false to update to the latest code changes.
   opts = {
     -- add any opts here
   },
@@ -61,7 +61,10 @@ For building binary if you wish to build from source, then `cargo` is required. 
     "nvim-lua/plenary.nvim",
     "MunifTanjim/nui.nvim",
     --- The below dependencies are optional,
+    "echasnovski/mini.pick", -- for file_selector provider mini.pick
+    "nvim-telescope/telescope.nvim", -- for file_selector provider telescope
     "hrsh7th/nvim-cmp", -- autocompletion for avante commands and mentions
+    "ibhagwan/fzf-lua", -- for file_selector provider fzf
     "nvim-tree/nvim-web-devicons", -- or echasnovski/mini.icons
     "zbirenbaum/copilot.lua", -- for providers='copilot'
     {
@@ -210,7 +213,10 @@ _See [config.lua#L9](./lua/avante/config.lua) for the full config_
 {
   ---@alias Provider "claude" | "openai" | "azure" | "gemini" | "cohere" | "copilot" | string
   provider = "claude", -- Recommend using Claude
-  auto_suggestions_provider = "claude", -- Since auto-suggestions are a high-frequency operation and therefore expensive, it is recommended to specify an inexpensive provider or even a free provider: copilot
+  -- WARNING: Since auto-suggestions are a high-frequency operation and therefore expensive,
+  -- currently designating it as `copilot` provider is dangerous because: https://github.com/yetone/avante.nvim/issues/1048
+  -- Of course, you can reduce the request frequency by increasing `suggestion.debounce`.
+  auto_suggestions_provider = "claude",
   claude = {
     endpoint = "https://api.anthropic.com",
     model = "claude-3-5-sonnet-20241022",
@@ -317,6 +323,10 @@ _See [config.lua#L9](./lua/avante/config.lua) for the full config_
     --- Disable by setting to -1.
     override_timeoutlen = 500,
   },
+  suggestion = {
+    debounce = 600,
+    throttle = 600,
+  },
 }
 ```
 ## Blink.cmp users
@@ -327,7 +337,7 @@ This is achieved but emulating nvim-cmp using blink.compat
 
 ```lua
       file_selector = {
-        --- @alias FileSelectorProvider "native" | "fzf" | "telescope" | string
+        --- @alias FileSelectorProvider "native" | "fzf" | "mini.pick" | "snacks" | "telescope" | string
         provider = "fzf",
         -- Options override for custom providers
         provider_opts = {},
@@ -360,7 +370,7 @@ For other users just add a custom provider
           opts = {},
         },
         avante_files = {
-          name = "avante_commands",
+          name = "avante_files",
           module = "blink.compat.source",
           score_offset = 100, -- show at a higher priority than lsp
           opts = {},
@@ -383,7 +393,7 @@ Given its early stage, `avante.nvim` currently supports the following basic func
 > [!IMPORTANT]
 >
 > Avante will only support Claude, and OpenAI (and its variants including azure)out-of-the-box due to its high code quality generation.
-> For all OpenAI-compatible providers, see [wiki](https://github.com/yetone/avante.nvim/wiki) for more details.
+> For all OpenAI-compatible providers, see [wiki](https://github.com/yetone/avante.nvim/wiki/Custom-providers) for more details.
 
 > [!IMPORTANT]
 >
@@ -546,6 +556,7 @@ If you have the following structure:
 - [x] Chat with project (You can use `@codebase` to chat with the whole project)
 - [x] Chat with selected files
 - [ ] CoT
+- [ ] Tool use
 
 ## Roadmap
 

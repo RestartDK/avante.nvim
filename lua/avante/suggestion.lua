@@ -130,9 +130,12 @@ L5:    pass
     },
   }
 
+  local diagnostics = Utils.get_diagnostics(bufnr)
+
   Llm.stream({
     provider = provider,
     ask = true,
+    diagnostics = vim.json.encode(diagnostics),
     selected_files = { { content = code_content, file_type = filetype, path = "" } },
     code_lang = filetype,
     history_messages = history_messages,
@@ -180,6 +183,7 @@ L5:    pass
                     break
                   end
                 end
+                if #new_content_lines == 0 then return nil end
                 return {
                   id = s.start_row,
                   original_start_row = s.start_row,
@@ -188,6 +192,7 @@ L5:    pass
                   content = Utils.trim_all_line_numbers(table.concat(new_content_lines, "\n")),
                 }
               end)
+              :filter(function(s) return s ~= nil end)
               :totable()
             --- sort the suggestions by start_row
             table.sort(new_suggestions, function(a, b) return a.start_row < b.start_row end)
@@ -203,6 +208,8 @@ L5:    pass
 end
 
 function Suggestion:show()
+  Utils.debug("showing suggestions, mode:", fn.mode())
+
   self:hide()
 
   if not fn.mode():match("^[iR]") then return end
@@ -212,6 +219,8 @@ function Suggestion:show()
   local bufnr = api.nvim_get_current_buf()
 
   local suggestions = ctx.suggestions_list and ctx.suggestions_list[ctx.current_suggestions_idx] or nil
+
+  Utils.debug("show suggestions", suggestions)
 
   if not suggestions then return end
 
@@ -225,15 +234,25 @@ function Suggestion:show()
     local current_lines = api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
     local virt_text_win_col = 0
+    local cursor_row, _ = Utils.get_cursor_pos()
 
-    if
-      start_row == end_row
-      and current_lines[start_row]
-      and #lines > 0
-      and vim.startswith(lines[1], current_lines[start_row])
-    then
-      virt_text_win_col = #current_lines[start_row]
-      lines[1] = string.sub(lines[1], #current_lines[start_row] + 1)
+    if start_row == end_row and start_row == cursor_row and current_lines[start_row] and #lines > 0 then
+      if vim.startswith(lines[1], current_lines[start_row]) then
+        virt_text_win_col = #current_lines[start_row]
+        lines[1] = string.sub(lines[1], #current_lines[start_row] + 1)
+      else
+        local patch = vim.diff(
+          current_lines[start_row],
+          lines[1],
+          ---@diagnostic disable-next-line: missing-fields
+          { algorithm = "histogram", result_type = "indices", ctxlen = vim.o.scrolloff }
+        )
+        Utils.debug("patch", patch)
+        if patch and #patch > 0 then
+          virt_text_win_col = patch[1][3]
+          lines[1] = string.sub(lines[1], patch[1][3] + 1)
+        end
+      end
     end
 
     local virt_lines = {}
@@ -270,7 +289,7 @@ function Suggestion:show()
     end
 
     for i = start_row, end_row do
-      if i == start_row and virt_text_win_col > 0 then goto continue end
+      if i == start_row and start_row == cursor_row and virt_text_win_col > 0 then goto continue end
       Utils.debug("add highlight", i - 1)
       api.nvim_buf_add_highlight(bufnr, SUGGESTION_NS, Highlights.TO_BE_DELETED, i - 1, 0, -1)
       ::continue::

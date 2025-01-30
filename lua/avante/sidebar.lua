@@ -64,6 +64,8 @@ function Sidebar:delete_autocmds()
 end
 
 function Sidebar:reset()
+  self:unbind_apply_key()
+  self:unbind_sidebar_keys()
   self:delete_autocmds()
   self.code = { bufnr = 0, winid = 0, selection = nil }
   self.winids =
@@ -86,6 +88,7 @@ function Sidebar:open(opts)
     self:initialize()
     if opts.selection then self.code.selection = opts.selection end
     self:render(opts)
+    self:focus()
   else
     if in_visual_mode or opts.selection then
       self:close()
@@ -167,11 +170,15 @@ end
 ---@field current_filepath string
 ---@field is_searching boolean
 ---@field is_replacing boolean
+---@field is_thinking boolean
 ---@field last_search_tag_start_line integer
 ---@field last_replace_tag_start_line integer
+---@field last_think_tag_start_line integer
+---@field last_think_tag_end_line integer
 
 ---@param selected_files {path: string, content: string, file_type: string | nil}[]
 ---@param result_content string
+---@param prev_filepath string
 ---@return AvanteReplacementResult
 local function transform_result_content(selected_files, result_content, prev_filepath)
   local transformed_lines = {}
@@ -180,8 +187,11 @@ local function transform_result_content(selected_files, result_content, prev_fil
 
   local is_searching = false
   local is_replacing = false
+  local is_thinking = false
   local last_search_tag_start_line = 0
   local last_replace_tag_start_line = 0
+  local last_think_tag_start_line = 0
+  local last_think_tag_end_line = 0
 
   local search_start = 0
 
@@ -283,6 +293,12 @@ local function transform_result_content(selected_files, result_content, prev_fil
       local prev_line = result_lines[i - 1]
       if not (prev_line and prev_line:match("^%s*```$")) then table.insert(transformed_lines, "```") end
       goto continue
+    elseif line_content == "<think>" then
+      is_thinking = true
+      last_think_tag_start_line = i
+    elseif line_content == "</think>" then
+      is_thinking = false
+      last_think_tag_end_line = i
     end
     table.insert(transformed_lines, line_content)
     ::continue::
@@ -294,8 +310,11 @@ local function transform_result_content(selected_files, result_content, prev_fil
     content = table.concat(transformed_lines, "\n"),
     is_searching = is_searching,
     is_replacing = is_replacing,
+    is_thinking = is_thinking,
     last_search_tag_start_line = last_search_tag_start_line,
     last_replace_tag_start_line = last_replace_tag_start_line,
+    last_think_tag_start_line = last_think_tag_start_line,
+    last_think_tag_end_line = last_think_tag_end_line,
   }
 end
 
@@ -348,8 +367,22 @@ local function get_searching_hint()
   return "\n" .. spinner .. " Searching..."
 end
 
+local thinking_spinner_chars = {
+  "🤯",
+  "🙄",
+}
+local thinking_spinner_index = 1
+
+local function get_thinking_spinner()
+  thinking_spinner_index = thinking_spinner_index + 1
+  if thinking_spinner_index > #thinking_spinner_chars then thinking_spinner_index = 1 end
+  local spinner = thinking_spinner_chars[thinking_spinner_index]
+  return "\n\n" .. spinner .. " Thinking..."
+end
+
 local function get_display_content_suffix(replacement)
   if replacement.is_searching then return get_searching_hint() end
+  if replacement.is_thinking then return get_thinking_spinner() end
   return ""
 end
 
@@ -361,6 +394,25 @@ local function generate_display_content(replacement)
       vim.list_slice(vim.split(replacement.content, "\n"), 1, replacement.last_search_tag_start_line - 1),
       "\n"
     )
+  end
+  if replacement.last_think_tag_start_line > 0 then
+    local lines = vim.split(replacement.content, "\n")
+    local last_think_tag_end_line = replacement.last_think_tag_end_line
+    if last_think_tag_end_line == 0 then last_think_tag_end_line = #lines + 1 end
+    local thinking_content_lines =
+      vim.list_slice(lines, replacement.last_think_tag_start_line + 2, last_think_tag_end_line - 1)
+    local formatted_thinking_content_lines = vim
+      .iter(thinking_content_lines)
+      :map(function(line)
+        if Utils.trim_spaces(line) == "" then return line end
+        return string.format("  > %s", line)
+      end)
+      :totable()
+    local result_lines =
+      vim.list_extend(vim.list_slice(lines, 1, replacement.last_search_tag_start_line), { "🤔 Thought content:" })
+    result_lines = vim.list_extend(result_lines, formatted_thinking_content_lines)
+    result_lines = vim.list_extend(result_lines, vim.list_slice(lines, last_think_tag_end_line + 1))
+    return table.concat(result_lines, "\n")
   end
   return replacement.content
 end
@@ -850,6 +902,82 @@ function Sidebar:render_selected_code()
   )
 end
 
+function Sidebar:bind_apply_key()
+  if self.result_container then
+    vim.keymap.set(
+      "n",
+      Config.mappings.sidebar.apply_cursor,
+      function() self:apply(true) end,
+      { buffer = self.result_container.bufnr, noremap = true, silent = true }
+    )
+  end
+end
+
+function Sidebar:unbind_apply_key()
+  if self.result_container then
+    pcall(vim.keymap.del, "n", Config.mappings.sidebar.apply_cursor, { buffer = self.result_container.bufnr })
+  end
+end
+
+function Sidebar:bind_sidebar_keys(codeblocks)
+  ---@param direction "next" | "prev"
+  local function jump_to_codeblock(direction)
+    local cursor_line = api.nvim_win_get_cursor(self.result_container.winid)[1]
+    ---@type AvanteCodeblock
+    local target_block
+
+    if direction == "next" then
+      for _, block in ipairs(codeblocks) do
+        if block.start_line > cursor_line then
+          target_block = block
+          break
+        end
+      end
+      if not target_block and #codeblocks > 0 then target_block = codeblocks[1] end
+    elseif direction == "prev" then
+      for i = #codeblocks, 1, -1 do
+        if codeblocks[i].end_line < cursor_line then
+          target_block = codeblocks[i]
+          break
+        end
+      end
+      if not target_block and #codeblocks > 0 then target_block = codeblocks[#codeblocks] end
+    end
+
+    if target_block then
+      api.nvim_win_set_cursor(self.result_container.winid, { target_block.start_line + 1, 0 })
+      vim.cmd("normal! zz")
+    end
+  end
+
+  vim.keymap.set(
+    "n",
+    Config.mappings.sidebar.apply_all,
+    function() self:apply(false) end,
+    { buffer = self.result_container.bufnr, noremap = true, silent = true }
+  )
+  vim.keymap.set(
+    "n",
+    Config.mappings.jump.next,
+    function() jump_to_codeblock("next") end,
+    { buffer = self.result_container.bufnr, noremap = true, silent = true }
+  )
+  vim.keymap.set(
+    "n",
+    Config.mappings.jump.prev,
+    function() jump_to_codeblock("prev") end,
+    { buffer = self.result_container.bufnr, noremap = true, silent = true }
+  )
+end
+
+function Sidebar:unbind_sidebar_keys()
+  if self.result_container and self.result_container.bufnr and api.nvim_buf_is_valid(self.result_container.bufnr) then
+    pcall(vim.keymap.del, "n", Config.mappings.sidebar.apply_all, { buffer = self.result_container.bufnr })
+    pcall(vim.keymap.del, "n", Config.mappings.jump.next, { buffer = self.result_container.bufnr })
+    pcall(vim.keymap.del, "n", Config.mappings.jump.prev, { buffer = self.result_container.bufnr })
+  end
+end
+
 ---@param opts AskOptions
 function Sidebar:on_mount(opts)
   self:refresh_winids()
@@ -896,84 +1024,8 @@ function Sidebar:on_mount(opts)
       })
   end
 
-  local function bind_apply_key()
-    vim.keymap.set(
-      "n",
-      Config.mappings.sidebar.apply_cursor,
-      function() self:apply(true) end,
-      { buffer = self.result_container.bufnr, noremap = true, silent = true }
-    )
-  end
-
-  local function unbind_apply_key()
-    pcall(vim.keymap.del, "n", Config.mappings.sidebar.apply_cursor, { buffer = self.result_container.bufnr })
-  end
-
   ---@type AvanteCodeblock[]
   local codeblocks = {}
-
-  ---@param direction "next" | "prev"
-  local function jump_to_codeblock(direction)
-    local cursor_line = api.nvim_win_get_cursor(self.result_container.winid)[1]
-    ---@type AvanteCodeblock
-    local target_block
-
-    if direction == "next" then
-      for _, block in ipairs(codeblocks) do
-        if block.start_line > cursor_line then
-          target_block = block
-          break
-        end
-      end
-      if not target_block and #codeblocks > 0 then target_block = codeblocks[1] end
-    elseif direction == "prev" then
-      for i = #codeblocks, 1, -1 do
-        if codeblocks[i].end_line < cursor_line then
-          target_block = codeblocks[i]
-          break
-        end
-      end
-      if not target_block and #codeblocks > 0 then target_block = codeblocks[#codeblocks] end
-    end
-
-    if target_block then
-      api.nvim_win_set_cursor(self.result_container.winid, { target_block.start_line + 1, 0 })
-      vim.cmd("normal! zz")
-    end
-  end
-
-  local function bind_sidebar_keys()
-    vim.keymap.set(
-      "n",
-      Config.mappings.sidebar.apply_all,
-      function() self:apply(false) end,
-      { buffer = self.result_container.bufnr, noremap = true, silent = true }
-    )
-    vim.keymap.set(
-      "n",
-      Config.mappings.jump.next,
-      function() jump_to_codeblock("next") end,
-      { buffer = self.result_container.bufnr, noremap = true, silent = true }
-    )
-    vim.keymap.set(
-      "n",
-      Config.mappings.jump.prev,
-      function() jump_to_codeblock("prev") end,
-      { buffer = self.result_container.bufnr, noremap = true, silent = true }
-    )
-  end
-
-  local function unbind_sidebar_keys()
-    if
-      self.result_container
-      and self.result_container.bufnr
-      and api.nvim_buf_is_valid(self.result_container.bufnr)
-    then
-      pcall(vim.keymap.del, "n", Config.mappings.sidebar.apply_all, { buffer = self.result_container.bufnr })
-      pcall(vim.keymap.del, "n", Config.mappings.jump.next, { buffer = self.result_container.bufnr })
-      pcall(vim.keymap.del, "n", Config.mappings.jump.prev, { buffer = self.result_container.bufnr })
-    end
-  end
 
   api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
     buffer = self.result_container.bufnr,
@@ -982,10 +1034,10 @@ function Sidebar:on_mount(opts)
 
       if block then
         show_apply_button(block)
-        bind_apply_key()
+        self:bind_apply_key()
       else
         api.nvim_buf_clear_namespace(ev.buf, CODEBLOCK_KEYBINDING_NAMESPACE, 0, -1)
-        unbind_apply_key()
+        self:unbind_apply_key()
       end
     end,
   })
@@ -994,7 +1046,7 @@ function Sidebar:on_mount(opts)
     buffer = self.result_container.bufnr,
     callback = function(ev)
       codeblocks = parse_codeblocks(ev.buf)
-      bind_sidebar_keys()
+      self:bind_sidebar_keys(codeblocks)
     end,
   })
 
@@ -1009,13 +1061,13 @@ function Sidebar:on_mount(opts)
         return
       end
       codeblocks = parse_codeblocks(self.result_container.bufnr)
-      bind_sidebar_keys()
+      self:bind_sidebar_keys(codeblocks)
     end,
   })
 
   api.nvim_create_autocmd("BufLeave", {
     buffer = self.result_container.bufnr,
-    callback = function() unbind_sidebar_keys() end,
+    callback = function() self:unbind_sidebar_keys() end,
   })
 
   self:render_result()
@@ -1049,7 +1101,12 @@ function Sidebar:on_mount(opts)
           and api.nvim_win_is_valid(self.input_container.winid)
         then
           api.nvim_set_current_win(self.input_container.winid)
-          if Config.windows.ask.start_insert then vim.cmd("startinsert") end
+          vim.defer_fn(function()
+            if Config.windows.ask.start_insert then
+              Utils.debug("starting insert")
+              vim.cmd("startinsert")
+            end
+          end, 300)
         end
       end
       return true
@@ -1202,7 +1259,7 @@ end
 ---@param opts? {focus?: boolean, scroll?: boolean, backspace?: integer, ignore_history?: boolean, callback?: fun(): nil} whether to focus the result view
 function Sidebar:update_content(content, opts)
   if not self.result_container or not self.result_container.bufnr then return end
-  opts = vim.tbl_deep_extend("force", { focus = true, scroll = true, stream = false, callback = nil }, opts or {})
+  opts = vim.tbl_deep_extend("force", { focus = false, scroll = true, stream = false, callback = nil }, opts or {})
   if not opts.ignore_history then
     local chat_history = Path.history.load(self.code.bufnr)
     content = self:render_history_content(chat_history) .. "---\n\n" .. content
@@ -1257,7 +1314,7 @@ function Sidebar:update_content(content, opts)
       Utils.update_buffer_content(self.result_container.bufnr, lines)
       Utils.lock_buf(self.result_container.bufnr)
       api.nvim_set_option_value("filetype", "Avante", { buf = self.result_container.bufnr })
-      if opts.focus and Config.behaviour.auto_focus_sidebar and not self:is_focused_on_result() then
+      if opts.focus and not self:is_focused_on_result() then
         --- set cursor to bottom of result view
         xpcall(function() api.nvim_set_current_win(self.result_container.winid) end, function(err) return err end)
       end
@@ -1599,7 +1656,7 @@ function Sidebar:create_input_container(opts)
     end
 
     return {
-      ask = opts.ask,
+      ask = opts.ask or true,
       project_context = vim.json.encode(project_context),
       selected_files = selected_files_contents,
       diagnostics = vim.json.encode(diagnostics),
@@ -1667,8 +1724,33 @@ function Sidebar:create_input_container(opts)
     local transformed_response = ""
     local displayed_response = ""
     local current_path = ""
+    local prev_is_thinking = false
 
     local is_first_chunk = true
+    local scroll = true
+
+    ---stop scroll when user presses j/k keys
+    local function on_j()
+      scroll = false
+      ---perform scroll
+      vim.cmd("normal! j")
+    end
+
+    local function on_k()
+      scroll = false
+      ---perform scroll
+      vim.cmd("normal! k")
+    end
+
+    local function on_G()
+      scroll = true
+      ---perform scroll
+      vim.cmd("normal! G")
+    end
+
+    vim.keymap.set("n", "j", on_j, { buffer = self.result_container.bufnr })
+    vim.keymap.set("n", "k", on_k, { buffer = self.result_container.bufnr })
+    vim.keymap.set("n", "G", on_G, { buffer = self.result_container.bufnr })
 
     ---@type AvanteChunkParser
     local on_chunk = function(chunk)
@@ -1676,40 +1758,48 @@ function Sidebar:create_input_container(opts)
 
       local selected_files = self.file_selector:get_selected_files_contents()
 
-      local transformed = transform_result_content(selected_files, transformed_response .. chunk, current_path)
+      local transformed =
+        transform_result_content(selected_files, transformed_response .. chunk, current_path, prev_is_thinking)
       transformed_response = transformed.content
+      prev_is_thinking = transformed.is_thinking
       if transformed.current_filepath and transformed.current_filepath ~= "" then
         current_path = transformed.current_filepath
       end
       local cur_displayed_response = generate_display_content(transformed)
       if is_first_chunk then
         is_first_chunk = false
-        self:update_content(content_prefix .. chunk, { scroll = true })
+        self:update_content(content_prefix .. chunk, { scroll = scroll })
         return
       end
       local suffix = get_display_content_suffix(transformed)
-      self:update_content(content_prefix .. cur_displayed_response .. suffix, { scroll = true })
+      self:update_content(content_prefix .. cur_displayed_response .. suffix, { scroll = scroll })
       vim.schedule(function() vim.cmd("redraw") end)
       displayed_response = cur_displayed_response
     end
 
     ---@type AvanteCompleteParser
     local on_complete = function(err)
+      pcall(function()
+        ---remove keymaps
+        vim.keymap.del("n", "j", { buffer = self.result_container.bufnr })
+        vim.keymap.del("n", "k", { buffer = self.result_container.bufnr })
+        vim.keymap.del("n", "G", { buffer = self.result_container.bufnr })
+      end)
+
       if err ~= nil then
         self:update_content(
           content_prefix .. displayed_response .. "\n\nError: " .. vim.inspect(err),
-          { scroll = true }
+          { scroll = scroll }
         )
         return
       end
 
-      -- Execute when the stream request is actually completed
       self:update_content(
         content_prefix
           .. displayed_response
           .. "\n\n**Generation complete!** Please review the code suggestions above.\n",
         {
-          scroll = true,
+          scroll = scroll,
           callback = function() api.nvim_exec_autocmds("User", { pattern = VIEW_BUFFER_UPDATED_PATTERN }) end,
         }
       )
@@ -1719,7 +1809,7 @@ function Sidebar:create_input_container(opts)
           self.result_container
           and self.result_container.winid
           and api.nvim_win_is_valid(self.result_container.winid)
-          and Config.behaviour.auto_focus_sidebar
+          and Config.behaviour.jump_result_buffer_on_finish
         then
           api.nvim_set_current_win(self.result_container.winid)
         end
@@ -2066,7 +2156,9 @@ function Sidebar:render(opts)
 
   -- reset states when buffer is closed
   api.nvim_buf_attach(self.code.bufnr, false, {
-    on_detach = function(_, _) self:reset() end,
+    on_detach = function(_, _)
+      if self and self.reset then self:reset() end
+    end,
   })
 
   self:create_selected_code_container()
@@ -2097,7 +2189,7 @@ function Sidebar:create_selected_files_container()
       swapfile = false,
       buftype = "nofile",
       bufhidden = "wipe",
-      filetype = "Avante",
+      filetype = "AvanteSelectedFiles",
     }),
     win_options = vim.tbl_deep_extend("force", base_win_options, {
       wrap = Config.windows.wrap,
