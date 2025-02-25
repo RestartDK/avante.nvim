@@ -2,20 +2,28 @@ local Utils = require("avante.utils")
 local Clipboard = require("avante.clipboard")
 local P = require("avante.providers")
 
----@class AvanteClaudeBaseMessage
----@field cache_control {type: "ephemeral"}?
----
----@class AvanteClaudeTextMessage: AvanteClaudeBaseMessage
----@field type "text"
----@field text string
----
----@class AvanteClaudeImageMessage: AvanteClaudeBaseMessage
----@field type "image"
----@field source {type: "base64", media_type: string, data: string}
----
----@class AvanteClaudeMessage
----@field role "user" | "assistant"
----@field content [AvanteClaudeTextMessage | AvanteClaudeImageMessage][]
+---@param tool AvanteLLMTool
+---@return AvanteClaudeTool
+local function transform_tool(tool)
+  local input_schema_properties = {}
+  local required = {}
+  for _, field in ipairs(tool.param.fields) do
+    input_schema_properties[field.name] = {
+      type = field.type,
+      description = field.description,
+    }
+    if not field.optional then table.insert(required, field.name) end
+  end
+  return {
+    name = tool.name,
+    description = tool.description,
+    input_schema = {
+      type = "object",
+      properties = input_schema_properties,
+      required = required,
+    },
+  }
+end
 
 ---@class AvanteProviderFunctor
 local M = {}
@@ -28,7 +36,7 @@ M.role_map = {
   assistant = "assistant",
 }
 
-M.parse_messages = function(opts)
+function M.parse_messages(opts)
   ---@type AvanteClaudeMessage[]
   local messages = {}
 
@@ -74,34 +82,141 @@ M.parse_messages = function(opts)
     messages[#messages].content = message_content
   end
 
+  if opts.tool_histories then
+    for _, tool_history in ipairs(opts.tool_histories) do
+      if tool_history.tool_use then
+        local msg = {
+          role = "assistant",
+          content = {},
+        }
+        if tool_history.tool_use.response_content then
+          msg.content[#msg.content + 1] = {
+            type = "text",
+            text = tool_history.tool_use.response_content,
+          }
+        end
+        msg.content[#msg.content + 1] = {
+          type = "tool_use",
+          id = tool_history.tool_use.id,
+          name = tool_history.tool_use.name,
+          input = vim.json.decode(tool_history.tool_use.input_json),
+        }
+        messages[#messages + 1] = msg
+      end
+
+      if tool_history.tool_result then
+        messages[#messages + 1] = {
+          role = "user",
+          content = {
+            {
+              type = "tool_result",
+              tool_use_id = tool_history.tool_result.tool_use_id,
+              content = tool_history.tool_result.content,
+              is_error = tool_history.tool_result.is_error,
+            },
+          },
+        }
+      end
+    end
+  end
+
   return messages
 end
 
-M.parse_response = function(data_stream, event_state, opts)
+function M.parse_response(ctx, data_stream, event_state, opts)
   if event_state == nil then
-    if data_stream:match('"content_block_delta"') then
-      event_state = "content_block_delta"
+    if data_stream:match('"message_start"') then
+      event_state = "message_start"
+    elseif data_stream:match('"message_delta"') then
+      event_state = "message_delta"
     elseif data_stream:match('"message_stop"') then
       event_state = "message_stop"
+    elseif data_stream:match('"content_block_start"') then
+      event_state = "content_block_start"
+    elseif data_stream:match('"content_block_delta"') then
+      event_state = "content_block_delta"
+    elseif data_stream:match('"content_block_stop"') then
+      event_state = "content_block_stop"
     end
   end
-  if event_state == "content_block_delta" then
-    local ok, json = pcall(vim.json.decode, data_stream)
+  if event_state == "message_start" then
+    local ok, jsn = pcall(vim.json.decode, data_stream)
     if not ok then return end
-    opts.on_chunk(json.delta.text)
-  elseif event_state == "message_stop" then
-    opts.on_complete(nil)
+    opts.on_start(jsn.message.usage)
+  elseif event_state == "content_block_start" then
+    local ok, jsn = pcall(vim.json.decode, data_stream)
+    if not ok then return end
+    if jsn.content_block.type == "tool_use" then
+      if not ctx.tool_use_list then ctx.tool_use_list = {} end
+      local tool_use = {
+        name = jsn.content_block.name,
+        id = jsn.content_block.id,
+        input_json = "",
+        response_content = nil,
+      }
+      table.insert(ctx.tool_use_list, tool_use)
+    elseif jsn.content_block.type == "text" then
+      ctx.response_content = ""
+    end
+  elseif event_state == "content_block_delta" then
+    local ok, jsn = pcall(vim.json.decode, data_stream)
+    if not ok then return end
+    if ctx.tool_use_list and jsn.delta.type == "input_json_delta" then
+      local tool_use = ctx.tool_use_list[#ctx.tool_use_list]
+      tool_use.input_json = tool_use.input_json .. jsn.delta.partial_json
+      return
+    elseif ctx.response_content and jsn.delta.type == "text_delta" then
+      ctx.response_content = ctx.response_content .. jsn.delta.text
+    end
+    if jsn.delta.type == "thinking_delta" then
+      if ctx.returned_think_start_tag == nil or not ctx.returned_think_start_tag then
+        ctx.returned_think_start_tag = true
+        opts.on_chunk("<think>\n")
+      end
+      ctx.last_think_content = jsn.delta.thinking
+      opts.on_chunk(jsn.delta.thinking)
+    elseif jsn.delta.type == "text_delta" then
+      if
+        ctx.returned_think_start_tag ~= nil and (ctx.returned_think_end_tag == nil or not ctx.returned_think_end_tag)
+      then
+        ctx.returned_think_end_tag = true
+        if ctx.last_think_content and ctx.last_think_content ~= vim.NIL and ctx.last_think_content:sub(-1) ~= "\n" then
+          opts.on_chunk("\n</think>\n\n")
+        else
+          opts.on_chunk("</think>\n\n")
+        end
+      end
+      opts.on_chunk(jsn.delta.text)
+    end
+  elseif event_state == "content_block_stop" then
+    if ctx.tool_use_list then
+      local tool_use = ctx.tool_use_list[#ctx.tool_use_list]
+      if tool_use.response_content == nil then tool_use.response_content = ctx.response_content end
+    end
+  elseif event_state == "message_delta" then
+    local ok, jsn = pcall(vim.json.decode, data_stream)
+    if not ok then return end
+    if jsn.delta.stop_reason == "end_turn" then
+      opts.on_stop({ reason = "complete", usage = jsn.usage })
+    elseif jsn.delta.stop_reason == "tool_use" then
+      opts.on_stop({
+        reason = "tool_use",
+        usage = jsn.usage,
+        tool_use_list = ctx.tool_use_list,
+      })
+    end
     return
   elseif event_state == "error" then
-    opts.on_complete(vim.json.decode(data_stream))
+    opts.on_stop({ reason = "error", error = vim.json.decode(data_stream) })
   end
 end
 
 ---@param provider AvanteProviderFunctor
 ---@param prompt_opts AvantePromptOptions
 ---@return table
-M.parse_curl_args = function(provider, prompt_opts)
-  local base, body_opts = P.parse_config(provider)
+function M.parse_curl_args(provider, prompt_opts)
+  local provider_conf, request_body = P.parse_config(provider)
+  local disable_tools = provider_conf.disable_tools or false
 
   local headers = {
     ["Content-Type"] = "application/json",
@@ -109,17 +224,24 @@ M.parse_curl_args = function(provider, prompt_opts)
     ["anthropic-beta"] = "prompt-caching-2024-07-31",
   }
 
-  if P.env.require_api_key(base) then headers["x-api-key"] = provider.parse_api_key() end
+  if P.env.require_api_key(provider_conf) then headers["x-api-key"] = provider.parse_api_key() end
 
   local messages = M.parse_messages(prompt_opts)
 
+  local tools = {}
+  if not disable_tools and prompt_opts.tools then
+    for _, tool in ipairs(prompt_opts.tools) do
+      table.insert(tools, transform_tool(tool))
+    end
+  end
+
   return {
-    url = Utils.url_join(base.endpoint, "/v1/messages"),
-    proxy = base.proxy,
-    insecure = base.allow_insecure,
+    url = Utils.url_join(provider_conf.endpoint, "/v1/messages"),
+    proxy = provider_conf.proxy,
+    insecure = provider_conf.allow_insecure,
     headers = headers,
     body = vim.tbl_deep_extend("force", {
-      model = base.model,
+      model = provider_conf.model,
       system = {
         {
           type = "text",
@@ -128,12 +250,13 @@ M.parse_curl_args = function(provider, prompt_opts)
         },
       },
       messages = messages,
+      tools = tools,
       stream = true,
-    }, body_opts),
+    }, request_body),
   }
 end
 
-M.on_error = function(result)
+function M.on_error(result)
   if not result.body then
     return Utils.error("API request failed with status " .. result.status, { once = true, title = "Avante" })
   end

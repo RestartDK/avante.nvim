@@ -3,31 +3,6 @@ local Config = require("avante.config")
 local Clipboard = require("avante.clipboard")
 local P = require("avante.providers")
 
----@class OpenAIChatResponse
----@field id string
----@field object "chat.completion" | "chat.completion.chunk"
----@field created integer
----@field model string
----@field system_fingerprint string
----@field choices? OpenAIResponseChoice[] | OpenAIResponseChoiceComplete[]
----@field usage {prompt_tokens: integer, completion_tokens: integer, total_tokens: integer}
----
----@class OpenAIResponseChoice
----@field index integer
----@field delta OpenAIMessage
----@field logprobs? integer
----@field finish_reason? "stop" | "length"
----
----@class OpenAIResponseChoiceComplete
----@field message OpenAIMessage
----@field finish_reason "stop" | "length" | "eos_token"
----@field index integer
----@field logprobs integer
----
----@class OpenAIMessage
----@field role? "user" | "system" | "assistant"
----@field content string
----
 ---@class AvanteProviderFunctor
 local M = {}
 
@@ -38,8 +13,40 @@ M.role_map = {
   assistant = "assistant",
 }
 
+---@param tool AvanteLLMTool
+---@return AvanteOpenAITool
+function M.transform_tool(tool)
+  local input_schema_properties = {}
+  local required = {}
+  for _, field in ipairs(tool.param.fields) do
+    input_schema_properties[field.name] = {
+      type = field.type,
+      description = field.description,
+    }
+    if not field.optional then table.insert(required, field.name) end
+  end
+  local res = {
+    type = "function",
+    ["function"] = {
+      name = tool.name,
+      description = tool.description,
+    },
+  }
+  if vim.tbl_count(input_schema_properties) > 0 then
+    res["function"].parameters = {
+      type = "object",
+      properties = input_schema_properties,
+      required = required,
+      additionalProperties = false,
+    }
+  end
+  return res
+end
+
+function M.is_openrouter(url) return url:match("^https://openrouter%.ai/") end
+
 ---@param opts AvantePromptOptions
-M.get_user_message = function(opts)
+function M.get_user_message(opts)
   vim.deprecate("get_user_message", "parse_messages", "0.1.0", "avante.nvim")
   return table.concat(
     vim
@@ -54,9 +61,9 @@ M.get_user_message = function(opts)
   )
 end
 
-M.is_o_series_model = function(model) return model and string.match(model, "^o%d+") ~= nil end
+function M.is_o_series_model(model) return model and string.match(model, "^o%d+") ~= nil end
 
-M.parse_messages = function(opts)
+function M.parse_messages(opts)
   local messages = {}
   local provider = P[Config.provider]
   local base, _ = P.parse_config(provider)
@@ -103,48 +110,122 @@ M.parse_messages = function(opts)
     table.insert(final_messages, { role = M.role_map[role] or role, content = message.content })
   end)
 
+  if opts.tool_histories then
+    for _, tool_history in ipairs(opts.tool_histories) do
+      table.insert(final_messages, {
+        role = M.role_map["assistant"],
+        tool_calls = {
+          {
+            id = tool_history.tool_use.id,
+            type = "function",
+            ["function"] = {
+              name = tool_history.tool_use.name,
+              arguments = tool_history.tool_use.input_json,
+            },
+          },
+        },
+      })
+      local result_content = tool_history.tool_result.content or ""
+      table.insert(final_messages, {
+        role = "tool",
+        tool_call_id = tool_history.tool_result.tool_use_id,
+        content = tool_history.tool_result.is_error and "Error: " .. result_content or result_content,
+      })
+    end
+  end
+
   return final_messages
 end
 
-M.parse_response = function(data_stream, _, opts)
+function M.parse_response(ctx, data_stream, _, opts)
   if data_stream:match('"%[DONE%]":') then
-    opts.on_complete(nil)
+    opts.on_stop({ reason = "complete" })
     return
   end
   if data_stream:match('"delta":') then
-    ---@type OpenAIChatResponse
-    local json = vim.json.decode(data_stream)
-    if json.choices and json.choices[1] then
-      local choice = json.choices[1]
+    ---@type AvanteOpenAIChatResponse
+    local jsn = vim.json.decode(data_stream)
+    if jsn.choices and jsn.choices[1] then
+      local choice = jsn.choices[1]
       if choice.finish_reason == "stop" or choice.finish_reason == "eos_token" then
-        opts.on_complete(nil)
+        if choice.delta.content and choice.delta.content ~= vim.NIL then opts.on_chunk(choice.delta.content) end
+        opts.on_stop({ reason = "complete" })
+      elseif choice.finish_reason == "tool_calls" then
+        opts.on_stop({
+          reason = "tool_use",
+          usage = jsn.usage,
+          tool_use_list = ctx.tool_use_list,
+        })
+      elseif choice.delta.reasoning_content and choice.delta.reasoning_content ~= vim.NIL then
+        if ctx.returned_think_start_tag == nil or not ctx.returned_think_start_tag then
+          ctx.returned_think_start_tag = true
+          opts.on_chunk("<think>\n")
+        end
+        ctx.last_think_content = choice.delta.reasoning_content
+        opts.on_chunk(choice.delta.reasoning_content)
+      elseif choice.delta.reasoning and choice.delta.reasoning ~= vim.NIL then
+        if ctx.returned_think_start_tag == nil or not ctx.returned_think_start_tag then
+          ctx.returned_think_start_tag = true
+          opts.on_chunk("<think>\n")
+        end
+        ctx.last_think_content = choice.delta.reasoning
+        opts.on_chunk(choice.delta.reasoning)
+      elseif choice.delta.tool_calls and choice.delta.tool_calls ~= vim.NIL then
+        local tool_call = choice.delta.tool_calls[1]
+        if not ctx.tool_use_list then ctx.tool_use_list = {} end
+        if not ctx.tool_use_list[tool_call.index + 1] then
+          local tool_use = {
+            name = tool_call["function"].name,
+            id = tool_call.id,
+            input_json = "",
+          }
+          ctx.tool_use_list[tool_call.index + 1] = tool_use
+        else
+          local tool_use = ctx.tool_use_list[tool_call.index + 1]
+          tool_use.input_json = tool_use.input_json .. tool_call["function"].arguments
+        end
       elseif choice.delta.content then
+        if
+          ctx.returned_think_start_tag ~= nil and (ctx.returned_think_end_tag == nil or not ctx.returned_think_end_tag)
+        then
+          ctx.returned_think_end_tag = true
+          if
+            ctx.last_think_content
+            and ctx.last_think_content ~= vim.NIL
+            and ctx.last_think_content:sub(-1) ~= "\n"
+          then
+            opts.on_chunk("\n</think>\n")
+          else
+            opts.on_chunk("</think>\n")
+          end
+        end
         if choice.delta.content ~= vim.NIL then opts.on_chunk(choice.delta.content) end
       end
     end
   end
 end
 
-M.parse_response_without_stream = function(data, _, opts)
-  ---@type OpenAIChatResponse
+function M.parse_response_without_stream(data, _, opts)
+  ---@type AvanteOpenAIChatResponse
   local json = vim.json.decode(data)
   if json.choices and json.choices[1] then
     local choice = json.choices[1]
     if choice.message and choice.message.content then
       opts.on_chunk(choice.message.content)
-      vim.schedule(function() opts.on_complete(nil) end)
+      vim.schedule(function() opts.on_stop({ reason = "complete" }) end)
     end
   end
 end
 
-M.parse_curl_args = function(provider, code_opts)
-  local base, body_opts = P.parse_config(provider)
+function M.parse_curl_args(provider, prompt_opts)
+  local provider_conf, request_body = P.parse_config(provider)
+  local disable_tools = provider_conf.disable_tools or false
 
   local headers = {
     ["Content-Type"] = "application/json",
   }
 
-  if P.env.require_api_key(base) then
+  if P.env.require_api_key(provider_conf) then
     local api_key = provider.parse_api_key()
     if api_key == nil then
       error(Config.provider .. " API key is not set, please set it in your environment variable or config file")
@@ -152,27 +233,42 @@ M.parse_curl_args = function(provider, code_opts)
     headers["Authorization"] = "Bearer " .. api_key
   end
 
-  -- NOTE: When using "o" series set the supported parameters only
-  local stream = true
-  if M.is_o_series_model(base.model) then
-    body_opts.max_completion_tokens = body_opts.max_tokens
-    body_opts.max_tokens = nil
-    body_opts.temperature = 1
+  if M.is_openrouter(provider_conf.endpoint) then
+    headers["HTTP-Referer"] = "https://github.com/yetone/avante.nvim"
+    headers["X-Title"] = "Avante.nvim"
+    request_body.include_reasoning = true
   end
 
-  Utils.debug("endpoint", base.endpoint)
-  Utils.debug("model", base.model)
+  -- NOTE: When using "o" series set the supported parameters only
+  local stream = true
+  if M.is_o_series_model(provider_conf.model) then
+    request_body.max_completion_tokens = request_body.max_tokens
+    request_body.max_tokens = nil
+    request_body.temperature = 1
+  end
+
+  local tools = nil
+  if not disable_tools and prompt_opts.tools then
+    tools = {}
+    for _, tool in ipairs(prompt_opts.tools) do
+      table.insert(tools, M.transform_tool(tool))
+    end
+  end
+
+  Utils.debug("endpoint", provider_conf.endpoint)
+  Utils.debug("model", provider_conf.model)
 
   return {
-    url = Utils.url_join(base.endpoint, "/chat/completions"),
-    proxy = base.proxy,
-    insecure = base.allow_insecure,
+    url = Utils.url_join(provider_conf.endpoint, "/chat/completions"),
+    proxy = provider_conf.proxy,
+    insecure = provider_conf.allow_insecure,
     headers = headers,
     body = vim.tbl_deep_extend("force", {
-      model = base.model,
-      messages = M.parse_messages(code_opts),
+      model = provider_conf.model,
+      messages = M.parse_messages(prompt_opts),
       stream = stream,
-    }, body_opts),
+      tools = tools,
+    }, request_body),
   }
 end
 

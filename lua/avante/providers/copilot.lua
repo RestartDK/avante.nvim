@@ -31,7 +31,7 @@ local Config = require("avante.config")
 local Path = require("plenary.path")
 local Utils = require("avante.utils")
 local P = require("avante.providers")
-local O = require("avante.providers").openai
+local OpenAI = require("avante.providers").openai
 
 local H = {}
 
@@ -98,7 +98,7 @@ end
 ---@field oauth_token string
 ---
 ---@return string
-H.get_oauth_token = function()
+function H.get_oauth_token()
   local xdg_config = vim.fn.expand("$XDG_CONFIG_HOME")
   local os_name = Utils.get_os_name()
   ---@type string
@@ -125,6 +125,7 @@ H.get_oauth_token = function()
   return vim
     .iter(
       ---@type table<string, OAuthToken>
+      ---@diagnostic disable-next-line: param-type-mismatch
       vim.json.decode(yason:read())
     )
     :filter(function(k, _) return k:match("github.com") end)
@@ -137,9 +138,9 @@ H.get_oauth_token = function()
 end
 
 H.chat_auth_url = "https://api.github.com/copilot_internal/v2/token"
-H.chat_completion_url = function(base_url) return Utils.url_join(base_url, "/chat/completions") end
+function H.chat_completion_url(base_url) return Utils.url_join(base_url, "/chat/completions") end
 
-H.refresh_token = function(async, force)
+function H.refresh_token(async, force)
   if not M.state then error("internal initialization error") end
 
   async = async == nil and true or async
@@ -165,7 +166,7 @@ H.refresh_token = function(async, force)
     insecure = Config.copilot.allow_insecure,
   }
 
-  local handle_response = function(response)
+  local function handle_response(response)
     if response.status == 200 then
       M.state.github_token = vim.json.decode(response.body)
       local file = Path:new(copilot_path)
@@ -208,30 +209,30 @@ M.role_map = {
   assistant = "assistant",
 }
 
-M.parse_messages = function(opts)
-  local messages = {
-    { role = "system", content = opts.system_prompt },
-  }
-  vim
-    .iter(opts.messages)
-    :each(function(msg) table.insert(messages, { role = M.role_map[msg.role], content = msg.content }) end)
-  return messages
-end
+M.parse_messages = OpenAI.parse_messages
 
-M.parse_response = O.parse_response
+M.parse_response = OpenAI.parse_response
 
-M.parse_curl_args = function(provider, code_opts)
+function M.parse_curl_args(provider, prompt_opts)
   -- refresh token synchronously, only if it has expired
   -- (this should rarely happen, as we refresh the token in the background)
   H.refresh_token(false, false)
 
-  local base, body_opts = P.parse_config(provider)
+  local provider_conf, request_body = P.parse_config(provider)
+  local disable_tools = provider_conf.disable_tools or false
+
+  local tools = {}
+  if not disable_tools and prompt_opts.tools then
+    for _, tool in ipairs(prompt_opts.tools) do
+      table.insert(tools, OpenAI.transform_tool(tool))
+    end
+  end
 
   return {
-    url = H.chat_completion_url(base.endpoint),
-    timeout = base.timeout,
-    proxy = base.proxy,
-    insecure = base.allow_insecure,
+    url = H.chat_completion_url(provider_conf.endpoint),
+    timeout = provider_conf.timeout,
+    proxy = provider_conf.proxy,
+    insecure = provider_conf.allow_insecure,
     headers = {
       ["Content-Type"] = "application/json",
       ["Authorization"] = "Bearer " .. M.state.github_token.token,
@@ -239,16 +240,17 @@ M.parse_curl_args = function(provider, code_opts)
       ["Editor-Version"] = ("Neovim/%s.%s.%s"):format(vim.version().major, vim.version().minor, vim.version().patch),
     },
     body = vim.tbl_deep_extend("force", {
-      model = base.model,
-      messages = M.parse_messages(code_opts),
+      model = provider_conf.model,
+      messages = M.parse_messages(prompt_opts),
       stream = true,
-    }, body_opts),
+      tools = tools,
+    }, request_body),
   }
 end
 
 M._refresh_timer = nil
 
-M.setup_timer = function()
+function M.setup_timer()
   if M._refresh_timer then
     M._refresh_timer:stop()
     M._refresh_timer:close()
@@ -271,7 +273,7 @@ M.setup_timer = function()
   )
 end
 
-M.setup_file_watcher = function()
+function M.setup_file_watcher()
   if M._file_watcher then return end
 
   local copilot_token_file = Path:new(copilot_path)
@@ -287,7 +289,7 @@ M.setup_file_watcher = function()
   )
 end
 
-M.setup = function()
+function M.setup()
   local copilot_token_file = Path:new(copilot_path)
 
   if not M.state then M.state = {
@@ -317,7 +319,7 @@ M.setup = function()
   vim.g.avante_login = true
 end
 
-M.cleanup = function()
+function M.cleanup()
   -- Cleanup refresh timer
   if M._refresh_timer then
     M._refresh_timer:stop()
@@ -342,6 +344,7 @@ M.cleanup = function()
 
   -- Cleanup file watcher
   if M._file_watcher then
+    ---@diagnostic disable-next-line: param-type-mismatch
     M._file_watcher:stop()
     M._file_watcher = nil
   end

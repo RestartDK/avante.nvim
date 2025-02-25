@@ -27,10 +27,12 @@ struct TemplateContext {
     use_xml_format: bool,
     ask: bool,
     code_lang: String,
-    selected_files: Vec<SelectedFile>,
+    selected_files: Option<Vec<SelectedFile>>,
     selected_code: Option<String>,
     project_context: Option<String>,
     diagnostics: Option<String>,
+    system_info: Option<String>,
+    model_name: Option<String>,
 }
 
 // Given the file name registered after add, the context table in Lua, resulted in a formatted
@@ -54,6 +56,8 @@ fn render(state: &State, template: &str, context: TemplateContext) -> LuaResult<
                   selected_code => context.selected_code,
                   project_context => context.project_context,
                   diagnostics => context.diagnostics,
+                  system_info => context.system_info,
+                  model_name => context.model_name,
                 })
                 .map_err(LuaError::external)
                 .unwrap())

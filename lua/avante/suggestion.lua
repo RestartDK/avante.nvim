@@ -84,8 +84,8 @@ function Suggestion:suggest()
 L1: def fib
 L2:
 L3: if __name__ == "__main__":
-L4:    # just pass
-L5:    pass
+L4:     # just pass
+L5:     pass
 </code>
       ]],
     },
@@ -95,7 +95,7 @@ L5:    pass
     },
     {
       role = "user",
-      content = '<question>{ "indentSize": 4, "position": { "row": 1, "col": 2 } }</question>',
+      content = '<question>{"insertSpaces":true,"tabSize":4,"indentSize":4,"position":{"row":1,"col":7}}</question>',
     },
     {
       role = "assistant",
@@ -141,8 +141,10 @@ L5:    pass
     history_messages = history_messages,
     instructions = vim.json.encode(doc),
     mode = "suggesting",
+    on_start = function(_) end,
     on_chunk = function(chunk) full_response = full_response .. chunk end,
-    on_complete = function(err)
+    on_stop = function(stop_opts)
+      local err = stop_opts.error
       if err then
         Utils.error("Error while suggesting: " .. vim.inspect(err), { once = true, title = "Avante" })
         return
@@ -152,10 +154,13 @@ L5:    pass
         local cursor_row, cursor_col = Utils.get_cursor_pos()
         if cursor_row ~= doc.position.row or cursor_col ~= doc.position.col then return end
         -- Clean up markdown code blocks
+        full_response = Utils.trim_think_content(full_response)
         full_response = full_response:gsub("^```%w*\n(.-)\n```$", "%1")
         full_response = full_response:gsub("(.-)\n```\n?$", "%1")
         -- Remove everything before the first '[' to ensure we get just the JSON array
         full_response = full_response:gsub("^.-(%[.*)", "%1")
+        -- Remove everything after the last ']' to ensure we get just the JSON array
+        full_response = full_response:gsub("(.*%]).-$", "%1")
         local ok, suggestions_list = pcall(vim.json.decode, full_response)
         if not ok then
           Utils.error("Error while decoding suggestions: " .. full_response, { once = true, title = "Avante" })
@@ -164,6 +169,9 @@ L5:    pass
         if not suggestions_list then
           Utils.info("No suggestions found", { once = true, title = "Avante" })
           return
+        end
+        if #suggestions_list ~= 0 and not vim.islist(suggestions_list[1]) then
+          suggestions_list = { suggestions_list }
         end
         local current_lines = Utils.get_buf_lines(0, -1, bufnr)
         suggestions_list = vim
