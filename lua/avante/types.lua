@@ -187,16 +187,12 @@ vim.g.avante_login = vim.g.avante_login
 ---
 ---@alias AvanteChatMessage AvanteClaudeMessage | AvanteOpenAIMessage | AvanteGeminiMessage
 ---
----@alias AvanteMessagesParser fun(opts: AvantePromptOptions): AvanteChatMessage[]
+---@alias AvanteMessagesParser fun(self: AvanteProviderFunctor, opts: AvantePromptOptions): AvanteChatMessage[]
 ---
 ---@class AvanteCurlOutput: {url: string, proxy: string, insecure: boolean, body: table<string, any> | string, headers: table<string, string>, rawArgs: string[] | nil}
----@alias AvanteCurlArgsParser fun(provider: AvanteProvider | AvanteProviderFunctor | AvanteBedrockProviderFunctor, prompt_opts: AvantePromptOptions): AvanteCurlOutput
+---@alias AvanteCurlArgsParser fun(self: AvanteProviderFunctor, prompt_opts: AvantePromptOptions): AvanteCurlOutput
 ---
----@class AvanteResponseParserOptions
----@field on_start AvanteLLMStartCallback
----@field on_chunk AvanteLLMChunkCallback
----@field on_stop AvanteLLMStopCallback
----@alias AvanteResponseParser fun(ctx: any, data_stream: string, event_state: string, opts: AvanteResponseParserOptions): nil
+---@alias AvanteResponseParser fun(self: AvanteProviderFunctor, ctx: any, data_stream: string, event_state: string, opts: AvanteHandlerOptions): nil
 ---
 ---@class AvanteDefaultBaseProvider: table<string, any>
 ---@field endpoint? string
@@ -208,12 +204,14 @@ vim.g.avante_login = vim.g.avante_login
 ---@field api_key_name? string
 ---@field _shellenv? string
 ---@field disable_tools? boolean
+---@field entra? boolean
 ---
 ---@class AvanteSupportedProvider: AvanteDefaultBaseProvider
 ---@field __inherited_from? string
 ---@field temperature? number
 ---@field max_tokens? number
 ---@field reasoning_effort? string
+---@field display_name? string
 ---
 ---@class AvanteLLMUsage
 ---@field input_tokens number
@@ -221,22 +219,32 @@ vim.g.avante_login = vim.g.avante_login
 ---@field cache_read_input_tokens number
 ---@field output_tokens number
 ---
+---@class AvanteLLMThinkingBlock
+---@field thinking string
+---@field signature string
+---
+---@class AvanteLLMRedactedThinkingBlock
+---@field data string
+---
 ---@class AvanteLLMToolUse
 ---@field name string
 ---@field id string
 ---@field input_json string
----@field response_content? string
+---@field response_contents? string[]
+---@field thinking_blocks? AvanteLLMThinkingBlock[]
+---@field redacted_thinking_blocks? AvanteLLMRedactedThinkingBlock[]
 ---
 ---@class AvanteLLMStartCallbackOptions
 ---@field usage? AvanteLLMUsage
 ---
 ---@class AvanteLLMStopCallbackOptions
----@field reason "complete" | "tool_use" | "error"
+---@field reason "complete" | "tool_use" | "error" | "rate_limit"
 ---@field error? string | table
 ---@field usage? AvanteLLMUsage
 ---@field tool_use_list? AvanteLLMToolUse[]
+---@field retry_after? integer
 ---
----@alias AvanteStreamParser fun(line: string, handler_opts: AvanteHandlerOptions): nil
+---@alias AvanteStreamParser fun(self: AvanteProviderFunctor, ctx: any, line: string, handler_opts: AvanteHandlerOptions): nil
 ---@alias AvanteLLMStartCallback fun(opts: AvanteLLMStartCallbackOptions): nil
 ---@alias AvanteLLMChunkCallback fun(chunk: string): any
 ---@alias AvanteLLMStopCallback fun(opts: AvanteLLMStopCallbackOptions): nil
@@ -248,10 +256,12 @@ vim.g.avante_login = vim.g.avante_login
 ---@field parse_api_key? fun(): string | nil
 ---
 ---@class AvanteProviderFunctor
+---@field support_prompt_caching boolean | nil
 ---@field role_map table<"user" | "assistant", string>
 ---@field parse_messages AvanteMessagesParser
 ---@field parse_response AvanteResponseParser
 ---@field parse_curl_args AvanteCurlArgsParser
+---@field is_disable_stream fun(self: AvanteProviderFunctor): boolean
 ---@field setup fun(): nil
 ---@field is_env_set fun(): boolean
 ---@field api_key_name string
@@ -262,13 +272,13 @@ vim.g.avante_login = vim.g.avante_login
 ---@field parse_stream_data? AvanteStreamParser
 ---@field on_error? fun(result: table<string, any>): nil
 ---
+---@alias AvanteBedrockPayloadBuilder fun(self: AvanteBedrockModelHandler | AvanteBedrockProviderFunctor, prompt_opts: AvantePromptOptions, request_body: table<string, any>): table<string, any>
+---
 ---@class AvanteBedrockProviderFunctor: AvanteProviderFunctor
 ---@field load_model_handler fun(): AvanteBedrockModelHandler
----@field build_bedrock_payload? fun(prompt_opts: AvantePromptOptions, body_opts: table<string, any>): table<string, any>
+---@field build_bedrock_payload? AvanteBedrockPayloadBuilder
 ---
----@alias AvanteBedrockPayloadBuilder fun(prompt_opts: AvantePromptOptions, body_opts: table<string, any>): table<string, any>
----
----@class AvanteBedrockModelHandler
+---@class AvanteBedrockModelHandler : AvanteProviderFunctor
 ---@field role_map table<"user" | "assistant", string>
 ---@field parse_messages AvanteMessagesParser
 ---@field parse_response AvanteResponseParser
@@ -290,6 +300,7 @@ vim.g.avante_login = vim.g.avante_login
 ---@field selected_files AvanteSelectedFiles[] | nil
 ---@field diagnostics string | nil
 ---@field history_messages AvanteLLMMessage[] | nil
+---@field memory string | nil
 ---
 ---@class AvanteGeneratePromptsOptions: AvanteTemplateOptions
 ---@field ask boolean
@@ -325,18 +336,49 @@ vim.g.avante_login = vim.g.avante_login
 ---@field returns AvanteLLMToolReturn[]
 ---@field enabled? fun(): boolean
 
+---@class AvanteLLMToolPublic : AvanteLLMTool
+---@field func AvanteLLMToolFunc
+
 ---@class AvanteLLMToolParam
----@field type string
+---@field type 'table'
 ---@field fields AvanteLLMToolParamField[]
 
 ---@class AvanteLLMToolParamField
 ---@field name string
 ---@field description string
----@field type string
+---@field type 'string' | 'integer'
 ---@field optional? boolean
 
 ---@class AvanteLLMToolReturn
 ---@field name string
 ---@field description string
----@field type string
+---@field type 'string' | 'string[]' | 'boolean'
 ---@field optional? boolean
+---
+---@class avante.ChatHistoryEntry
+---@field timestamp string
+---@field provider string
+---@field model string
+---@field request string
+---@field response string
+---@field original_response string
+---@field selected_file {filepath: string}?
+---@field selected_code {filetype: string, content: string}?
+---@field reset_memory boolean?
+---@field selected_filepaths string[] | nil
+---
+---@class avante.ChatHistory
+---@field title string
+---@field timestamp string
+---@field entries avante.ChatHistoryEntry[]
+---@field memory avante.ChatMemory | nil
+---
+---@class avante.ChatMemory
+---@field content string
+---@field last_summarized_timestamp string
+---
+---@class avante.CurlOpts
+---@field provider AvanteProviderFunctor
+---@field prompt_opts AvantePromptOptions
+---@field handler_opts AvanteHandlerOptions
+---

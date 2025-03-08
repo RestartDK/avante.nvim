@@ -209,16 +209,20 @@ M.role_map = {
   assistant = "assistant",
 }
 
+function M:is_disable_stream() return false end
+
 M.parse_messages = OpenAI.parse_messages
 
 M.parse_response = OpenAI.parse_response
 
-function M.parse_curl_args(provider, prompt_opts)
+M.is_o_series_model = OpenAI.is_o_series_model
+
+function M:parse_curl_args(prompt_opts)
   -- refresh token synchronously, only if it has expired
   -- (this should rarely happen, as we refresh the token in the background)
   H.refresh_token(false, false)
 
-  local provider_conf, request_body = P.parse_config(provider)
+  local provider_conf, request_body = P.parse_config(self)
   local disable_tools = provider_conf.disable_tools or false
 
   local tools = {}
@@ -241,7 +245,7 @@ function M.parse_curl_args(provider, prompt_opts)
     },
     body = vim.tbl_deep_extend("force", {
       model = provider_conf.model,
-      messages = M.parse_messages(prompt_opts),
+      messages = self:parse_messages(prompt_opts),
       stream = true,
       tools = tools,
     }, request_body),
@@ -284,7 +288,10 @@ function M.setup_file_watcher()
     {},
     vim.schedule_wrap(function()
       -- Reload token from file
-      if copilot_token_file:exists() then M.state.github_token = vim.json.decode(copilot_token_file:read()) end
+      if copilot_token_file:exists() then
+        local ok, token = pcall(vim.json.decode, copilot_token_file:read())
+        if ok then M.state.github_token = token end
+      end
     end)
   )
 end

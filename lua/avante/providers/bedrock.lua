@@ -7,6 +7,13 @@ local M = {}
 M.api_key_name = "BEDROCK_KEYS"
 M.use_xml_format = true
 
+M = setmetatable(M, {
+  __index = function(_, k)
+    local model_handler = M.load_model_handler()
+    return model_handler[k]
+  end,
+})
+
 function M.load_model_handler()
   local provider_conf, _ = P.parse_config(P["bedrock"])
   local bedrock_model = provider_conf.model
@@ -18,17 +25,22 @@ function M.load_model_handler()
   error(error_msg)
 end
 
-function M.parse_response(ctx, data_stream, event_state, opts)
+function M:parse_messages(prompt_opts)
   local model_handler = M.load_model_handler()
-  return model_handler.parse_response(ctx, data_stream, event_state, opts)
+  return model_handler.parse_messages(self, prompt_opts)
 end
 
-function M.build_bedrock_payload(prompt_opts, body_opts)
+function M:parse_response(ctx, data_stream, event_state, opts)
   local model_handler = M.load_model_handler()
-  return model_handler.build_bedrock_payload(prompt_opts, body_opts)
+  return model_handler.parse_response(self, ctx, data_stream, event_state, opts)
 end
 
-function M.parse_stream_data(data, opts)
+function M:build_bedrock_payload(prompt_opts, request_body)
+  local model_handler = M.load_model_handler()
+  return model_handler.build_bedrock_payload(self, prompt_opts, request_body)
+end
+
+function M:parse_stream_data(ctx, data, opts)
   -- @NOTE: Decode and process Bedrock response
   -- Each response contains a Base64-encoded `bytes` field, which is decoded into JSON.
   -- The `type` field in the decoded JSON determines how the response is handled.
@@ -37,17 +49,26 @@ function M.parse_stream_data(data, opts)
     local jsn = vim.json.decode(bedrock_data_match)
     local data_stream = vim.base64.decode(jsn.bytes)
     local json = vim.json.decode(data_stream)
-    M.parse_response({}, data_stream, json.type, opts)
+    self:parse_response(ctx, data_stream, json.type, opts)
   end
 end
 
----@param provider AvanteBedrockProviderFunctor
+function M:parse_response_without_stream(data, event_state, opts)
+  local bedrock_match = data:gmatch("exception(%b{})")
+  opts.on_chunk("\n**Exception caught**\n\n")
+  for bedrock_data_match in bedrock_match do
+    local jsn = vim.json.decode(bedrock_data_match)
+    opts.on_chunk("- " .. jsn.message .. "\n")
+  end
+  vim.schedule(function() opts.on_stop({ reason = "complete" }) end)
+end
+
 ---@param prompt_opts AvantePromptOptions
 ---@return table
-function M.parse_curl_args(provider, prompt_opts)
-  local base, body_opts = P.parse_config(provider)
+function M:parse_curl_args(prompt_opts)
+  local provider_conf, request_body = P.parse_config(self)
 
-  local api_key = provider.parse_api_key()
+  local api_key = self.parse_api_key()
   if api_key == nil then error("Cannot get the bedrock api key!") end
   local parts = vim.split(api_key, ",")
   local aws_access_key_id = parts[1]
@@ -58,7 +79,7 @@ function M.parse_curl_args(provider, prompt_opts)
   local endpoint = string.format(
     "https://bedrock-runtime.%s.amazonaws.com/model/%s/invoke-with-response-stream",
     aws_region,
-    base.model
+    provider_conf.model
   )
 
   local headers = {
@@ -67,7 +88,7 @@ function M.parse_curl_args(provider, prompt_opts)
 
   if aws_session_token and aws_session_token ~= "" then headers["x-amz-security-token"] = aws_session_token end
 
-  local body_payload = M.build_bedrock_payload(prompt_opts, body_opts)
+  local body_payload = self:build_bedrock_payload(prompt_opts, request_body)
 
   local rawArgs = {
     "--aws-sigv4",
@@ -78,8 +99,8 @@ function M.parse_curl_args(provider, prompt_opts)
 
   return {
     url = endpoint,
-    proxy = base.proxy,
-    insecure = base.allow_insecure,
+    proxy = provider_conf.proxy,
+    insecure = provider_conf.allow_insecure,
     headers = headers,
     body = body_payload,
     rawArgs = rawArgs,

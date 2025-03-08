@@ -148,6 +148,12 @@ function Sidebar:close(opts)
   vim.cmd("wincmd =")
 end
 
+function Sidebar:shutdown()
+  Llm.cancel_inflight_request()
+  self:close()
+  vim.cmd("stopinsert")
+end
+
 ---@return boolean
 function Sidebar:focus()
   if self:is_open() then
@@ -1320,7 +1326,7 @@ function Sidebar:apply(current_cursor)
     for filepath, snippets in pairs(selected_snippets_map) do
       if Config.behaviour.minimize_diff then snippets = self:minimize_snippets(filepath, snippets) end
       local bufnr = Utils.get_or_create_buffer_with_filepath(filepath)
-      local path_ = PPath:new(filepath)
+      local path_ = PPath:new(Utils.is_win() and filepath:gsub("/", "\\") or filepath)
       path_:parent():mkdir({ parents = true, exists_ok = true })
       insert_conflict_contents(bufnr, snippets)
       local function process(winid)
@@ -2073,11 +2079,11 @@ function Sidebar:get_layout()
   return vim.tbl_contains({ "left", "right" }, calculate_config_window_position()) and "vertical" or "horizontal"
 end
 
----@param history avante.ChatHistoryEntry[]
+---@param history avante.ChatHistory
 ---@return string
 function Sidebar:render_history_content(history)
   local content = ""
-  for idx, entry in ipairs(history) do
+  for idx, entry in ipairs(history.entries) do
     if entry.reset_memory then
       content = content .. "***MEMORY RESET***\n\n"
       if idx < #history then content = content .. "-------\n\n" end
@@ -2146,11 +2152,11 @@ end
 function Sidebar:clear_history(args, cb)
   local chat_history = Path.history.load(self.code.bufnr)
   if next(chat_history) ~= nil then
-    chat_history = {}
+    chat_history.entries = {}
     Path.history.save(self.code.bufnr, chat_history)
     self:update_content(
       "Chat history cleared",
-      { focus = false, scroll = false, callback = function() self:focus_input() end }
+      { ignore_history = true, focus = false, scroll = false, callback = function() self:focus_input() end }
     )
     if cb then cb(args) end
   else
@@ -2159,6 +2165,16 @@ function Sidebar:clear_history(args, cb)
       { focus = false, scroll = false, callback = function() self:focus_input() end }
     )
   end
+end
+
+function Sidebar:new_chat(args, cb)
+  Path.history.new(self.code.bufnr)
+  Sidebar.reload_chat_history()
+  self:update_content(
+    "New chat",
+    { ignore_history = true, focus = false, scroll = false, callback = function() self:focus_input() end }
+  )
+  if cb then cb(args) end
 end
 
 function Sidebar:reset_memory(args, cb)
@@ -2167,7 +2183,7 @@ function Sidebar:reset_memory(args, cb)
     table.insert(chat_history, {
       timestamp = get_timestamp(),
       provider = Config.provider,
-      model = Config.get_provider(Config.provider).model,
+      model = Config.get_provider_config(Config.provider).model,
       request = "",
       response = "",
       original_response = "",
@@ -2176,6 +2192,7 @@ function Sidebar:reset_memory(args, cb)
       reset_memory = true,
     })
     Path.history.save(self.code.bufnr, chat_history)
+    Sidebar.reload_chat_history()
     local history_content = self:render_history_content(chat_history)
     self:update_content(history_content, {
       focus = false,
@@ -2184,6 +2201,7 @@ function Sidebar:reset_memory(args, cb)
     })
     if cb then cb(args) end
   else
+    Sidebar.reload_chat_history()
     self:update_content(
       "Chat history is already empty",
       { focus = false, scroll = false, callback = function() self:focus_input() end }
@@ -2191,7 +2209,7 @@ function Sidebar:reset_memory(args, cb)
   end
 end
 
----@alias AvanteSlashCommandType "clear" | "help" | "lines" | "reset" | "commit"
+---@alias AvanteSlashCommandType "clear" | "help" | "lines" | "reset" | "commit" | "new"
 ---@alias AvanteSlashCommandCallback fun(args: string, cb?: fun(args: string): nil): nil
 ---@alias AvanteSlashCommand {description: string, command: AvanteSlashCommandType, details: string, shorthelp?: string, callback?: AvanteSlashCommandCallback}
 ---@return AvanteSlashCommand[]
@@ -2211,6 +2229,7 @@ function Sidebar:get_commands()
     { description = "Show help message", command = "help" },
     { description = "Clear chat history", command = "clear" },
     { description = "Reset memory", command = "reset" },
+    { description = "New chat", command = "new" },
     {
       shorthelp = "Ask a question about specific lines",
       description = "/lines <start>-<end> <question>",
@@ -2228,6 +2247,7 @@ function Sidebar:get_commands()
     end,
     clear = function(args, cb) self:clear_history(args, cb) end,
     reset = function(args, cb) self:reset_memory(args, cb) end,
+    new = function(args, cb) self:new_chat(args, cb) end,
     lines = function(args, cb)
       if cb then cb(args) end
     end,
@@ -2298,6 +2318,8 @@ function Sidebar:create_input_container(opts)
 
   local chat_history = Path.history.load(self.code.bufnr)
 
+  Sidebar.reload_chat_history = function() chat_history = Path.history.load(self.code.bufnr) end
+
   local tools = vim.deepcopy(LLMTools.get_tools())
   table.insert(tools, {
     name = "add_file_to_context",
@@ -2317,8 +2339,7 @@ function Sidebar:create_input_container(opts)
   table.insert(tools, {
     name = "remove_file_from_context",
     description = "Remove a file from the context",
-    ---@param input { rel_path: string }
-    ---@type AvanteLLMToolFunc
+    ---@type AvanteLLMToolFunc<{ rel_path: string }>
     func = function(input)
       self.file_selector:remove_selected_file(input.rel_path)
       return "Removed file from context", nil
@@ -2331,8 +2352,9 @@ function Sidebar:create_input_container(opts)
   })
 
   ---@param request string
-  ---@return AvanteGeneratePromptsOptions
-  local function get_generate_prompts_options(request)
+  ---@param summarize_memory boolean
+  ---@param cb fun(opts: AvanteGeneratePromptsOptions): nil
+  local function get_generate_prompts_options(request, summarize_memory, cb)
     local filetype = api.nvim_get_option_value("filetype", { buf = self.code.bufnr })
 
     local selected_code_content = nil
@@ -2356,40 +2378,19 @@ function Sidebar:create_input_container(opts)
       end
     end
 
-    local history_messages = {}
-    for i = #chat_history, 1, -1 do
-      local entry = chat_history[i]
-      if entry.reset_memory then break end
-      if
-        entry.request == nil
-        or entry.original_response == nil
-        or entry.request == ""
-        or entry.original_response == ""
-      then
-        break
-      end
-      table.insert(
-        history_messages,
-        1,
-        { role = "assistant", content = Utils.trim_think_content(entry.original_response) }
-      )
-      local user_content = ""
-      if entry.selected_file ~= nil then
-        user_content = user_content .. "SELECTED FILE: " .. entry.selected_file.filepath .. "\n\n"
-      end
-      if entry.selected_code ~= nil then
-        user_content = user_content
-          .. "SELECTED CODE:\n\n```"
-          .. entry.selected_code.filetype
-          .. "\n"
-          .. entry.selected_code.content
-          .. "\n```\n\n"
-      end
-      user_content = user_content .. "USER PROMPT:\n\n" .. entry.request
-      table.insert(history_messages, 1, { role = "user", content = user_content })
+    local entries = Utils.history.filter_active_entries(chat_history.entries)
+
+    if chat_history.memory then
+      entries = vim
+        .iter(entries)
+        :filter(function(entry) return entry.timestamp > chat_history.memory.last_summarized_timestamp end)
+        :totable()
     end
 
-    return {
+    local history_messages = Utils.history.entries_to_llm_messages(entries)
+
+    ---@type AvanteGeneratePromptsOptions
+    local prompts_opts = {
       ask = opts.ask or true,
       project_context = vim.json.encode(project_context),
       selected_files = selected_files_contents,
@@ -2401,11 +2402,26 @@ function Sidebar:create_input_container(opts)
       mode = Config.behaviour.enable_cursor_planning_mode and "cursor-planning" or "planning",
       tools = tools,
     }
+
+    if chat_history.memory then prompts_opts.memory = chat_history.memory.content end
+
+    if not summarize_memory or #history_messages < 8 then
+      cb(prompts_opts)
+      return
+    end
+
+    prompts_opts.history_messages = vim.list_slice(prompts_opts.history_messages, 5)
+
+    Llm.summarize_memory(self.code.bufnr, chat_history, function(memory)
+      if memory then prompts_opts.memory = memory.content end
+      cb(prompts_opts)
+    end)
   end
 
   ---@param request string
   local function handle_submit(request)
-    local model = Config.has_provider(Config.provider) and Config.get_provider(Config.provider).model or "default"
+    local model = Config.has_provider(Config.provider) and Config.get_provider_config(Config.provider).model
+      or "default"
 
     local timestamp = get_timestamp()
 
@@ -2495,7 +2511,23 @@ function Sidebar:create_input_container(opts)
     local function on_chunk(chunk)
       self.is_generating = true
 
-      original_response = original_response .. chunk
+      local remove_line = [[\033[1A\033[K]]
+      if chunk:sub(1, #remove_line) == remove_line then
+        chunk = chunk:sub(#remove_line + 1)
+        local lines = vim.split(transformed_response, "\n")
+        local idx = #lines
+        while idx > 0 and lines[idx] == "" do
+          idx = idx - 1
+        end
+        if idx == 1 then
+          lines = {}
+        else
+          lines = vim.list_slice(lines, 1, idx - 1)
+        end
+        transformed_response = table.concat(lines, "\n")
+      else
+        original_response = original_response .. chunk
+      end
 
       local selected_files = self.file_selector:get_selected_files_contents()
 
@@ -2569,7 +2601,8 @@ function Sidebar:create_input_container(opts)
       end, 0)
 
       -- Save chat history
-      table.insert(chat_history or {}, {
+      chat_history.entries = chat_history.entries or {}
+      table.insert(chat_history.entries, {
         timestamp = timestamp,
         provider = Config.provider,
         model = model,
@@ -2582,17 +2615,18 @@ function Sidebar:create_input_container(opts)
       Path.history.save(self.code.bufnr, chat_history)
     end
 
-    local generate_prompts_options = get_generate_prompts_options(request)
-    ---@type AvanteLLMStreamOptions
-    ---@diagnostic disable-next-line: assign-type-mismatch
-    local stream_options = vim.tbl_deep_extend("force", generate_prompts_options, {
-      on_start = on_start,
-      on_chunk = on_chunk,
-      on_stop = on_stop,
-      on_tool_log = on_tool_log,
-    })
+    get_generate_prompts_options(request, true, function(generate_prompts_options)
+      ---@type AvanteLLMStreamOptions
+      ---@diagnostic disable-next-line: assign-type-mismatch
+      local stream_options = vim.tbl_deep_extend("force", generate_prompts_options, {
+        on_start = on_start,
+        on_chunk = on_chunk,
+        on_stop = on_stop,
+        on_tool_log = on_tool_log,
+      })
 
-    Llm.stream(stream_options)
+      Llm.stream(stream_options)
+    end)
   end
 
   local function get_position()
@@ -2669,6 +2703,8 @@ function Sidebar:create_input_container(opts)
 
   self.input_container:map("n", Config.mappings.submit.normal, on_submit)
   self.input_container:map("i", Config.mappings.submit.insert, on_submit)
+  self.input_container:map("n", Config.mappings.sidebar.close_from_input.normal, function() self:shutdown() end)
+  self.input_container:map("i", Config.mappings.sidebar.close_from_input.insert, function() self:shutdown() end)
 
   api.nvim_set_option_value("filetype", "AvanteInput", { buf = self.input_container.bufnr })
 
@@ -2747,37 +2783,43 @@ function Sidebar:create_input_container(opts)
     local hint_text = (fn.mode() ~= "i" and Config.mappings.submit.normal or Config.mappings.submit.insert)
       .. ": submit"
 
-    if Config.behaviour.enable_token_counting then
-      local input_value = table.concat(api.nvim_buf_get_lines(self.input_container.bufnr, 0, -1, false), "\n")
-      local generate_prompts_options = get_generate_prompts_options(input_value)
-      local tokens = Llm.calculate_tokens(generate_prompts_options)
-      hint_text = "Tokens: " .. tostring(tokens) .. "; " .. hint_text
+    local function show()
+      local buf = api.nvim_create_buf(false, true)
+      api.nvim_buf_set_lines(buf, 0, -1, false, { hint_text })
+      api.nvim_buf_add_highlight(buf, 0, "AvantePopupHint", 0, 0, -1)
+
+      -- Get the current window size
+      local win_width = api.nvim_win_get_width(self.input_container.winid)
+      local width = #hint_text
+
+      -- Set the floating window options
+      local win_opts = {
+        relative = "win",
+        win = self.input_container.winid,
+        width = width,
+        height = 1,
+        row = get_float_window_row(),
+        col = math.max(win_width - width, 0), -- Display in the bottom right corner
+        style = "minimal",
+        border = "none",
+        focusable = false,
+        zindex = 100,
+      }
+
+      -- Create the floating window
+      hint_window = api.nvim_open_win(buf, false, win_opts)
     end
 
-    local buf = api.nvim_create_buf(false, true)
-    api.nvim_buf_set_lines(buf, 0, -1, false, { hint_text })
-    api.nvim_buf_add_highlight(buf, 0, "AvantePopupHint", 0, 0, -1)
-
-    -- Get the current window size
-    local win_width = api.nvim_win_get_width(self.input_container.winid)
-    local width = #hint_text
-
-    -- Set the floating window options
-    local win_opts = {
-      relative = "win",
-      win = self.input_container.winid,
-      width = width,
-      height = 1,
-      row = get_float_window_row(),
-      col = math.max(win_width - width, 0), -- Display in the bottom right corner
-      style = "minimal",
-      border = "none",
-      focusable = false,
-      zindex = 100,
-    }
-
-    -- Create the floating window
-    hint_window = api.nvim_open_win(buf, false, win_opts)
+    if Config.behaviour.enable_token_counting then
+      local input_value = table.concat(api.nvim_buf_get_lines(self.input_container.bufnr, 0, -1, false), "\n")
+      get_generate_prompts_options(input_value, false, function(generate_prompts_options)
+        local tokens = Llm.calculate_tokens(generate_prompts_options)
+        hint_text = "Tokens: " .. tostring(tokens) .. "; " .. hint_text
+        show()
+      end)
+    else
+      show()
+    end
   end
 
   api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "VimResized" }, {
@@ -2793,6 +2835,20 @@ function Sidebar:create_input_container(opts)
     group = self.augroup,
     buffer = self.input_container.bufnr,
     callback = function() close_hint() end,
+  })
+
+  api.nvim_create_autocmd("BufEnter", {
+    group = self.augroup,
+    buffer = self.input_container.bufnr,
+    callback = function()
+      if Config.windows.ask.start_insert then vim.cmd("startinsert") end
+    end,
+  })
+
+  api.nvim_create_autocmd("BufLeave", {
+    group = self.augroup,
+    buffer = self.input_container.bufnr,
+    callback = function() vim.cmd("stopinsert") end,
   })
 
   -- Show hint in insert mode
@@ -2922,10 +2978,7 @@ function Sidebar:render(opts)
     xpcall(function() api.nvim_buf_set_name(self.result_container.bufnr, RESULT_BUF_NAME) end, function(_) end)
   end)
 
-  self.result_container:map("n", Config.mappings.sidebar.close, function()
-    Llm.cancel_inflight_request()
-    self:close()
-  end)
+  self.result_container:map("n", Config.mappings.sidebar.close, function() self:shutdown() end)
 
   self:create_input_container(opts)
 

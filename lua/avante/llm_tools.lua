@@ -30,7 +30,22 @@ local function has_permission_to_access(abs_path)
   if abs_path:sub(1, #project_root) ~= project_root then return false end
   local gitignore_path = project_root .. "/.gitignore"
   local gitignore_patterns, gitignore_negate_patterns = Utils.parse_gitignore(gitignore_path)
-  return not Utils.is_ignored(abs_path, gitignore_patterns, gitignore_negate_patterns)
+  -- The checker should only take care of the path inside the project root
+  -- Specifically, it should not check the project root itself
+  -- Otherwise if the binary is named the same as the project root (such as Go binary), any paths
+  -- insde the project root will be ignored
+  local rel_path = Utils.make_relative_path(abs_path, project_root)
+  return not Utils.is_ignored(rel_path, gitignore_patterns, gitignore_negate_patterns)
+end
+
+---@type AvanteLLMToolFunc<{ rel_path: string, pattern: string }>
+function M.glob(opts, on_log)
+  local abs_path = get_abs_path(opts.rel_path)
+  if not has_permission_to_access(abs_path) then return "", "No permission to access path: " .. abs_path end
+  if on_log then on_log("path: " .. abs_path) end
+  if on_log then on_log("pattern: " .. opts.pattern) end
+  local files = vim.fn.glob(abs_path .. "/" .. opts.pattern, true, true)
+  return vim.json.encode(files), nil
 end
 
 ---@type AvanteLLMToolFunc<{ rel_path: string, max_depth?: integer }>
@@ -84,7 +99,7 @@ function M.search_keyword(opts, on_log)
   ---execute the search command
   local cmd = ""
   if search_cmd:find("rg") then
-    cmd = string.format("%s --files-with-matches --no-ignore-vcs --ignore-case --hidden --glob '!.git'", search_cmd)
+    cmd = string.format("%s --files-with-matches --ignore-case --hidden --glob '!.git'", search_cmd)
     cmd = string.format("%s '%s' %s", cmd, opts.keyword, abs_path)
   elseif search_cmd:find("ag") then
     cmd = string.format("%s '%s' --nocolor --nogroup --hidden --ignore .git %s", search_cmd, opts.keyword, abs_path)
@@ -238,7 +253,7 @@ function M.delete_dir(opts, on_log)
 end
 
 ---@type AvanteLLMToolFunc<{ rel_path: string, command: string }>
-function M.run_command(opts, on_log, on_complete)
+function M.bash(opts, on_log, on_complete)
   local abs_path = get_abs_path(opts.rel_path)
   if not has_permission_to_access(abs_path) then return false, "No permission to access path: " .. abs_path end
   if not Path:new(abs_path):exists() then return false, "Path not found: " .. abs_path end
@@ -249,14 +264,11 @@ function M.run_command(opts, on_log, on_complete)
     return false, "User canceled"
   end
   ---change cwd to abs_path
-  local old_cwd = vim.fn.getcwd()
-  vim.fn.chdir(abs_path)
   ---@param output string
   ---@param exit_code integer
   ---@return string | boolean | nil result
   ---@return string | nil error
   local function handle_result(output, exit_code)
-    vim.fn.chdir(old_cwd)
     if exit_code ~= 0 then
       if output then return false, "Error: " .. output .. "; Error code: " .. tostring(exit_code) end
       return false, "Error code: " .. tostring(exit_code)
@@ -264,13 +276,16 @@ function M.run_command(opts, on_log, on_complete)
     return output, nil
   end
   if on_complete then
-    Utils.shell_run_async(opts.command, Config.run_command.shell_cmd, function(output, exit_code)
+    Utils.shell_run_async(opts.command, "bash -c", function(output, exit_code)
       local result, err = handle_result(output, exit_code)
       on_complete(result, err)
-    end)
+    end, abs_path)
     return nil, nil
   end
-  local res = Utils.shell_run(opts.command, Config.run_command.shell_cmd)
+  local old_cwd = vim.fn.getcwd()
+  vim.fn.chdir(abs_path)
+  local res = Utils.shell_run(opts.command, "bash -c")
+  vim.fn.chdir(old_cwd)
   return handle_result(res.stdout, res.code)
 end
 
@@ -337,7 +352,7 @@ function M.web_search(opts, on_log)
   elseif provider_type == "google" then
     local engine_id = os.getenv(search_engine.engine_id_name)
     if engine_id == nil or engine_id == "" then
-      return nil, "Environment variable " .. search_engine.engine_id_namee .. " is not set"
+      return nil, "Environment variable " .. search_engine.engine_id_name .. " is not set"
     end
     local query_params = vim.tbl_deep_extend("force", {
       key = api_key,
@@ -373,6 +388,23 @@ function M.web_search(opts, on_log)
     if resp.status ~= 200 then return nil, "Error: " .. resp.body end
     local jsn = vim.json.decode(resp.body)
     return search_engine.format_response_body(jsn)
+  elseif provider_type == "brave" then
+    local query_params = vim.tbl_deep_extend("force", {
+      q = opts.query,
+    }, search_engine.extra_request_body)
+    local query_string = ""
+    for key, value in pairs(query_params) do
+      query_string = query_string .. key .. "=" .. vim.uri_encode(value) .. "&"
+    end
+    local resp = curl.get("https://api.search.brave.com/res/v1/web/search?" .. query_string, {
+      headers = {
+        ["Content-Type"] = "application/json",
+        ["X-Subscription-Token"] = api_key,
+      },
+    })
+    if resp.status ~= 200 then return nil, "Error: " .. resp.body end
+    local jsn = vim.json.decode(resp.body)
+    return search_engine.format_response_body(jsn)
   end
 end
 
@@ -380,8 +412,8 @@ end
 function M.fetch(opts, on_log)
   if on_log then on_log("url: " .. opts.url) end
   local Html2Md = require("avante.html2md")
-  local res = Html2Md.fetch_md(opts.url)
-  if res == nil then return nil, "Failed to fetch markdown" end
+  local res, err = Html2Md.fetch_md(opts.url)
+  if err then return nil, err end
   return res, nil
 end
 
@@ -515,7 +547,7 @@ function M.rag_search(opts, on_log)
 end
 
 ---@type AvanteLLMToolFunc<{ code: string, rel_path: string, container_image?: string }>
-function M.python(opts, on_log)
+function M.python(opts, on_log, on_complete)
   local abs_path = get_abs_path(opts.rel_path)
   if not has_permission_to_access(abs_path) then return nil, "No permission to access path: " .. abs_path end
   if not Path:new(abs_path):exists() then return nil, "Path not found: " .. abs_path end
@@ -535,12 +567,15 @@ function M.python(opts, on_log)
     return nil, "User canceled"
   end
   if vim.fn.executable("docker") == 0 then return nil, "Python tool is not available to execute any code" end
-  ---change cwd to abs_path
-  local old_cwd = vim.fn.getcwd()
 
-  vim.fn.chdir(abs_path)
-  local output = vim
-    .system({
+  local function handle_result(result) ---@param result vim.SystemCompleted
+    if result.code ~= 0 then return nil, "Error: " .. (result.stderr or "Unknown error") end
+
+    Utils.debug("output", result.stdout)
+    return result.stdout, nil
+  end
+  local job = vim.system(
+    {
       "docker",
       "run",
       "--rm",
@@ -552,24 +587,31 @@ function M.python(opts, on_log)
       "python",
       "-c",
       opts.code,
-    }, {
+    },
+    {
       text = true,
-    })
-    :wait()
-
-  vim.fn.chdir(old_cwd)
-
-  if output.code ~= 0 then return nil, "Error: " .. (output.stderr or "Unknown error") end
-
-  Utils.debug("output", output.stdout)
-  return output.stdout, nil
+      cwd = abs_path,
+    },
+    vim.schedule_wrap(function(result)
+      if not on_complete then return end
+      local output, err = handle_result(result)
+      on_complete(output, err)
+    end)
+  )
+  if on_complete then return end
+  local result = job:wait()
+  return handle_result(result)
 end
 
 ---@return AvanteLLMTool[]
 function M.get_tools()
+  ---@type AvanteLLMTool[]
+  local unfiltered_tools = vim.list_extend(vim.list_extend({}, M._tools), Config.custom_tools)
   return vim
-    .iter(M._tools)
-    :filter(function(tool)
+    .iter(unfiltered_tools)
+    :filter(function(tool) ---@param tool AvanteLLMTool
+      -- Always disable tools that are explicitly disabled
+      if vim.tbl_contains(Config.disabled_tools, tool.name) then return false end
       if tool.enabled == nil then
         return true
       else
@@ -581,6 +623,38 @@ end
 
 ---@type AvanteLLMTool[]
 M._tools = {
+  {
+    name = "glob",
+    description = 'Fast file pattern matching using glob patterns like "**/*.js"',
+    param = {
+      type = "table",
+      fields = {
+        {
+          name = "pattern",
+          description = "Glob pattern",
+          type = "string",
+        },
+        {
+          name = "rel_path",
+          description = "Relative path to the directory, as cwd",
+          type = "string",
+        },
+      },
+    },
+    returns = {
+      {
+        name = "matches",
+        description = "List of matched files",
+        type = "string",
+      },
+      {
+        name = "err",
+        description = "Error message",
+        type = "string",
+        optional = true,
+      },
+    },
+  },
   {
     name = "rag_search",
     enabled = function() return Config.rag_service.enabled and RagService.is_ready() end,
@@ -611,7 +685,7 @@ M._tools = {
   },
   {
     name = "python",
-    description = "Run python code",
+    description = "Run python code. Can't use it to read files or modify files.",
     param = {
       type = "table",
       fields = {
@@ -826,7 +900,7 @@ M._tools = {
   },
   {
     name = "read_file",
-    description = "Read the contents of a file",
+    description = "Read the contents of a file. If the file content is already in the context, do not use this tool.",
     param = {
       type = "table",
       fields = {
@@ -1024,8 +1098,8 @@ M._tools = {
     },
   },
   {
-    name = "run_command",
-    description = "Run a command in a directory",
+    name = "bash",
+    description = "Run a bash command in a directory. Can't use search commands like find/grep or read tools like cat/ls.",
     param = {
       type = "table",
       fields = {

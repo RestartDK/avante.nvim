@@ -196,28 +196,27 @@ M.env = E
 
 M = setmetatable(M, {
   ---@param t avante.Providers
-  ---@param k Provider
+  ---@param k ProviderName
   __index = function(t, k)
-    ---@type AvanteProviderFunctor | AvanteBedrockProviderFunctor
-    local Opts = M.get_config(k)
+    local provider_config = M.get_config(k)
 
     ---@diagnostic disable: undefined-field,no-unknown,inject-field
     if Config.vendors[k] ~= nil then
-      if Opts.parse_response_data ~= nil then
+      if provider_config.parse_response_data ~= nil then
         Utils.error("parse_response_data is not supported for avante.nvim vendors")
       end
-      if Opts.__inherited_from ~= nil then
-        local BaseOpts = M.get_config(Opts.__inherited_from)
-        local ok, module = pcall(require, "avante.providers." .. Opts.__inherited_from)
-        if not ok then error("Failed to load provider: " .. Opts.__inherited_from) end
-        t[k] = vim.tbl_deep_extend("keep", Opts, BaseOpts, module)
+      if provider_config.__inherited_from ~= nil then
+        local base_provider_config = M.get_config(provider_config.__inherited_from)
+        local ok, module = pcall(require, "avante.providers." .. provider_config.__inherited_from)
+        if not ok then error("Failed to load provider: " .. provider_config.__inherited_from) end
+        t[k] = Utils.deep_extend_with_metatable("keep", provider_config, base_provider_config, module)
       else
-        t[k] = Opts
+        t[k] = provider_config
       end
     else
       local ok, module = pcall(require, "avante.providers." .. k)
       if not ok then error("Failed to load provider: " .. k) end
-      t[k] = vim.tbl_deep_extend("keep", Opts, module)
+      t[k] = Utils.deep_extend_with_metatable("keep", provider_config, module)
     end
 
     t[k].parse_api_key = function() return E.parse_envvar(t[k]) end
@@ -261,16 +260,23 @@ function M.setup()
       E.setup({ provider = cursor_applying_provider })
     end
   end
+
+  if Config.memory_summary_provider then
+    local memory_summary_provider = M[Config.memory_summary_provider]
+    if memory_summary_provider and memory_summary_provider ~= provider then
+      E.setup({ provider = memory_summary_provider })
+    end
+  end
 end
 
----@param provider Provider
-function M.refresh(provider)
-  require("avante.config").override({ provider = provider })
+---@param provider_name ProviderName
+function M.refresh(provider_name)
+  require("avante.config").override({ provider = provider_name })
 
   ---@type AvanteProviderFunctor | AvanteBedrockProviderFunctor
   local p = M[Config.provider]
   E.setup({ provider = p, refresh = true })
-  Utils.info("Switch to provider: " .. provider, { once = true, title = "Avante" })
+  Utils.info("Switch to provider: " .. provider_name, { once = true, title = "Avante" })
 end
 
 ---@param opts AvanteProvider | AvanteSupportedProvider | AvanteProviderFunctor | AvanteBedrockProviderFunctor
@@ -302,11 +308,10 @@ function M.parse_config(opts)
 end
 
 ---@private
----@param provider Provider
----@return AvanteProviderFunctor | AvanteBedrockProviderFunctor
-function M.get_config(provider)
-  provider = provider or Config.provider
-  local cur = Config.get_provider(provider)
+---@param provider_name ProviderName
+function M.get_config(provider_name)
+  provider_name = provider_name or Config.provider
+  local cur = Config.get_provider_config(provider_name)
   return type(cur) == "function" and cur() or cur
 end
 

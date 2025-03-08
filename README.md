@@ -30,11 +30,11 @@
 >
 > 🥰 This project is undergoing rapid iterations, and many exciting features will be added successively. Stay tuned!
 
-https://github.com/user-attachments/assets/510e6270-b6cf-459d-9a2f-15b397d1fe53
+<https://github.com/user-attachments/assets/510e6270-b6cf-459d-9a2f-15b397d1fe53>
 
-https://github.com/user-attachments/assets/86140bfd-08b4-483d-a887-1b701d9e37dd
+<https://github.com/user-attachments/assets/86140bfd-08b4-483d-a887-1b701d9e37dd>
 
-## Sponsorship
+## Sponsorship ❤️
 
 If you like this project, please consider supporting me on Patreon, as it helps me to continue maintaining and improving it:
 
@@ -57,7 +57,6 @@ For building binary if you wish to build from source, then `cargo` is required. 
 {
   "yetone/avante.nvim",
   event = "VeryLazy",
-  lazy = false,
   version = false, -- Set this to "*" to always pull the latest release version, or set it to false to update to the latest code changes.
   opts = {
     -- add any opts here
@@ -275,7 +274,7 @@ require('avante').setup ({
 
 > [!TIP]
 >
-> Any rendering plugins that support markdown should work with Avante as long as you add the supported filetype `Avante`. See https://github.com/yetone/avante.nvim/issues/175 and [this comment](https://github.com/yetone/avante.nvim/issues/175#issuecomment-2313749363) for more information.
+> Any rendering plugins that support markdown should work with Avante as long as you add the supported filetype `Avante`. See <https://github.com/yetone/avante.nvim/issues/175> and [this comment](https://github.com/yetone/avante.nvim/issues/175#issuecomment-2313749363) for more information.
 
 ### Default setup configuration
 
@@ -404,7 +403,9 @@ _See [config.lua#L9](./lua/avante/config.lua) for the full config_
   },
 }
 ```
+
 ## Blink.cmp users
+
 For blink cmp users (nvim-cmp alternative) view below instruction for configuration
 This is achieved by emulating nvim-cmp using blink.compat
 or you can use [Kaiser-Yang/blink-cmp-avante](https://github.com/Kaiser-Yang/blink-cmp-avante).
@@ -471,6 +472,7 @@ To create a customized file_selector, you can specify a customized function to l
 
 Choose a selector other that native, the default as that currently has an issue
 For lazyvim users copy the full config for blink.cmp from the website or extend the options
+
 ```lua
       compat = {
         "avante_commands",
@@ -478,7 +480,9 @@ For lazyvim users copy the full config for blink.cmp from the website or extend 
         "avante_files",
       }
 ```
+
 For other users just add a custom provider
+
 ```lua
       default = {
         ...
@@ -487,6 +491,7 @@ For other users just add a custom provider
         "avante_files",
       }
 ```
+
 ```lua
       providers = {
         avante_commands = {
@@ -510,6 +515,7 @@ For other users just add a custom provider
         ...
     }
 ```
+
 </details>
 
 ## Usage
@@ -561,6 +567,7 @@ Given its early stage, `avante.nvim` currently supports the following basic func
 > export BEDROCK_KEYS=aws_access_key_id,aws_secret_access_key,aws_region[,aws_session_token]
 >
 > ```
+>
 > Note: The aws_session_token is optional and only needed when using temporary AWS credentials
 
 1. Open a code file in Neovim.
@@ -577,8 +584,10 @@ The following key bindings are available for use with `avante.nvim`:
 | Key Binding                               | Description                                  |
 | ----------------------------------------- | -------------------------------------------- |
 | <kbd>Leader</kbd><kbd>a</kbd><kbd>a</kbd> | show sidebar                                 |
+| <kbd>Leader</kbd><kbd>a</kbd><kbd>t</kbd> | toggle sidebar visibility                    |
 | <kbd>Leader</kbd><kbd>a</kbd><kbd>r</kbd> | refresh sidebar                              |
 | <kbd>Leader</kbd><kbd>a</kbd><kbd>f</kbd> | switch sidebar focus                         |
+| <kbd>Leader</kbd><kbd>a</kbd><kbd>?</kbd> | select model                                 |
 | <kbd>Leader</kbd><kbd>a</kbd><kbd>e</kbd> | edit selected blocks                         |
 | <kbd>c</kbd><kbd>o</kbd>                  | choose ours                                  |
 | <kbd>c</kbd><kbd>t</kbd>                  | choose theirs                                |
@@ -603,6 +612,7 @@ The following key bindings are available for use with `avante.nvim`:
 | `:AvanteAsk [question] [position]` | Ask AI about your code. Optional `position` set window position and `ask` enable/disable direct asking mode | `:AvanteAsk position=right Refactor this code here`
 | `:AvanteBuild` | Build dependencies for the project |
 | `:AvanteChat` | Start a chat session with AI about your codebase. Default is `ask`=false |
+| `:AvanteClear` | Clear the chat history |
 | `:AvanteEdit` | Edit the selected code blocks |
 | `:AvanteFocus` | Switch focus to/from the sidebar |
 | `:AvanteRefresh` | Refresh all Avante windows |
@@ -643,29 +653,48 @@ Therefore, I have adopted Cursor’s method to implement planning applying. For 
 
 ## RAG Service
 
-Avante provides a RAG service, which is a tool for obtaining the required context for the AI to generate the codes. Default it not enabled, you can enable it in this way:
+Avante provides a RAG service, which is a tool for obtaining the required context for the AI to generate the codes. By default, it is not enabled. You can enable it this way:
 
 ```lua
 rag_service = {
-  enabled = true, -- Enables the rag service, requires OPENAI_API_KEY to be set
+  enabled = false, -- Enables the RAG service
+  host_mount = os.getenv("HOME"), -- Host mount path for the rag service
+  provider = "openai", -- The provider to use for RAG service (e.g. openai or ollama)
+  llm_model = "", -- The LLM model to use for RAG service
+  embed_model = "", -- The embedding model to use for RAG service
+  endpoint = "https://api.openai.com/v1", -- The API endpoint for RAG service
 },
 ```
 
-Please note that since the RAG service uses OpenAI for embeddings, you must set `OPENAI_API_KEY` environment variable!
+If your rag_service provider is `openai`, then you need to set the `OPENAI_API_KEY` environment variable!
 
-Additionally, RAG Service also depends on Docker! (For macOS users, OrbStack is recommended as a Docker alternative)
+If your rag_service provider is `ollama`, you need to set the endpoint to `http://localhost:11434` (note there is no `/v1` at the end) or any address of your own ollama server.
+
+If your rag_service provider is `ollama`, when `llm_model` is empty, it defaults to `llama3`, and when `embed_model` is empty, it defaults to `nomic-embed-text`. Please make sure these models are available in your ollama server.
+
+Additionally, RAG Service also depends on Docker! (For macOS users, OrbStack is recommended as a Docker alternative).
+
+`host_mount` is the path that will be mounted to the container, and the default is the home directory. The mount is required
+for the RAG service to access the files in the host machine. It is up to the user to decide if you want to mount the whole
+`/` directory, just the project directory, or the home directory. If you plan using avante and RAG event for projects
+stored outside your home directory, you will need to set the `host_mount` to the root directory of your file system.
+
+The mount will be read only.
+
+After changing the rag_service configuration, you need to manually delete the rag_service container to ensure the new configuration is used: `docker rm -fv avante-rag-service`
 
 ## Web Search Engines
 
 Avante's tools include some web search engines, currently support:
 
-- [tavily](https://tavily.com/)
-- [serpapi](https://serpapi.com/)
-- [searchapi](https://www.searchapi.io/)
-- google's [programmable search engine](https://developers.google.com/custom-search/v1/overview)
-- [kagi](https://help.kagi.com/kagi/api/search.html)
+- [Tavily](https://tavily.com/)
+- [SerpApi](https://serpapi.com/)
+- [SearchAPI](https://www.searchapi.io/)
+- Google's [Programmable Search Engine](https://developers.google.com/custom-search/v1/overview)
+- [Kagi](https://help.kagi.com/kagi/api/search.html)
+- [Brave Search](https://api-dashboard.search.brave.com/app/documentation/web-search/get-started)
 
-The default is tavily, and can be changed through configuring `Config.web_search_engine.provider`:
+The default is Tavily, and can be changed through configuring `Config.web_search_engine.provider`:
 
 ```lua
 web_search_engine = {
@@ -673,9 +702,16 @@ web_search_engine = {
 }
 ```
 
-You need to set the environment variable `TAVILY_API_KEY` , `SERPAPI_API_KEY`, `SEARCHAPI_API_KEY` to use tavily or serpapi or searchapi.
-To use google, set the `GOOGLE_SEARCH_API_KEY` as the [API key](https://developers.google.com/custom-search/v1/overview), and `GOOGLE_SEARCH_ENGINE_ID` as the [search engine](https://programmablesearchengine.google.com) ID.
-To use kagi, set the `KAGI_API_KEY` as the [API Token](https://kagi.com/settings?p=api).
+Environment variables required for providers:
+
+- Tavily: `TAVILY_API_KEY`
+- SerpApi: `SERPAPI_API_KEY`
+- SearchAPI: `SEARCHAPI_API_KEY`
+- Google:
+  - `GOOGLE_SEARCH_API_KEY` as the [API key](https://developers.google.com/custom-search/v1/overview)
+  - `GOOGLE_SEARCH_ENGINE_ID` as the [search engine](https://programmablesearchengine.google.com) ID
+- Kagi: `KAGI_API_KEY` as the [API Token](https://kagi.com/settings?p=api)
+- Brave Search: `BRAVE_API_KEY` as the [API key](https://api-dashboard.search.brave.com/app/keys)
 
 ## Disable Tools
 
@@ -690,6 +726,66 @@ Avante enables tools by default, but some LLM models do not support tools. You c
     temperature = 0,
     max_tokens = 4096,
     disable_tools = true, -- disable tools!
+  },
+}
+```
+
+In case you want to ban some tools to avoid its usage (like Claude 3.7 overusing the python tool) you can disable just specific tools
+
+```lua
+{
+  disabled_tools = { "python" },
+}
+```
+
+Tool list
+> rag_search, python, git_diff, git_commit, list_files, search_files, search_keyword, read_file_toplevel_symbols,
+> read_file, create_file, rename_file, delete_file, create_dir, rename_dir, delete_dir, bash, web_search, fetch
+
+## Custom Tools
+
+Avante allows you to define custom tools that can be used by the AI during code generation and analysis. These tools can execute shell commands, run scripts, or perform any custom logic you need.
+
+### Example: Go Test Runner
+
+Here's an example of a custom tool that runs Go unit tests:
+
+```lua
+{
+  custom_tools = {
+    {
+      name = "run_go_tests",  -- Unique name for the tool
+      description = "Run Go unit tests and return results",  -- Description shown to AI
+      command = "go test -v ./...",  -- Shell command to execute
+      param = {  -- Input parameters (optional)
+        type = "table",
+        fields = {
+          {
+            name = "target",
+            description = "Package or directory to test (e.g. './pkg/...' or './internal/pkg')",
+            type = "string",
+            optional = true,
+          },
+        },
+      },
+      returns = {  -- Expected return values
+        {
+          name = "result",
+          description = "Result of the fetch",
+          type = "string",
+        },
+        {
+          name = "error",
+          description = "Error message if the fetch was not successful",
+          type = "string",
+          optional = true,
+        },
+      },
+      func = function(params, on_log, on_complete)  -- Custom function to execute
+        local target = params.target or "./..."
+        return vim.fn.system(string.format("go test -v %s", target))
+      end,
+    },
   },
 }
 ```
@@ -760,8 +856,8 @@ If you have the following structure:
 - [x] Smart Tab (Cursor Flow)
 - [x] Chat with project (You can use `@codebase` to chat with the whole project)
 - [x] Chat with selected files
-- [ ] CoT
 - [x] Tool use
+- [ ] MCP
 
 ## Roadmap
 

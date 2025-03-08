@@ -7,7 +7,7 @@ struct State<'a> {
     environment: Mutex<Option<Environment<'a>>>,
 }
 
-impl<'a> State<'a> {
+impl State<'_> {
     fn new() -> Self {
         State {
             environment: Mutex::new(None),
@@ -33,6 +33,7 @@ struct TemplateContext {
     diagnostics: Option<String>,
     system_info: Option<String>,
     model_name: Option<String>,
+    memory: Option<String>,
 }
 
 // Given the file name registered after add, the context table in Lua, resulted in a formatted
@@ -58,6 +59,7 @@ fn render(state: &State, template: &str, context: TemplateContext) -> LuaResult<
                   diagnostics => context.diagnostics,
                   system_info => context.system_info,
                   model_name => context.model_name,
+                  memory => context.memory,
                 })
                 .map_err(LuaError::external)
                 .unwrap())
